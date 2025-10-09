@@ -13,7 +13,7 @@
 	"files": {
 		"experimentalScannerIgnores": ["dist", "node_modules"],
 		"ignoreUnknown": false,
-		"includes": ["**", "!package.json"]
+		"includes": ["**", "!package.json", "!dist"]
 	},
 	"formatter": {
 		"attributePosition": "auto",
