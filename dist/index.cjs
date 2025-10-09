@@ -122,7 +122,7 @@ var DetoxReporter = class {
   }
   /**
    * Called when Jest test run starts
-   * 
+   *
    * @description Initiates a new launch in ReportPortal with configured attributes and description.
    * Sets up the launch ID in storage for subsequent test items to reference.
    */
@@ -139,7 +139,7 @@ var DetoxReporter = class {
   }
   /**
    * Called when a test case starts execution
-   * 
+   *
    * @param test - Jest test object containing file path and metadata
    * @param testCaseStartInfo - Test case start information including ancestor titles and timing
    * @description Initiates the test suite hierarchy and starts the individual test step in ReportPortal.
@@ -151,7 +151,7 @@ var DetoxReporter = class {
   }
   /**
    * Called when a test case completes execution
-   * 
+   *
    * @param test - Jest test object containing file path and metadata
    * @param testCaseResult - Test case result information including status and failure details
    * @description Finishes the test step in ReportPortal with the final status and any error information.
@@ -162,7 +162,7 @@ var DetoxReporter = class {
   }
   /**
    * Called when a test file completes execution
-   * 
+   *
    * @param test - Jest test object containing file path and metadata
    * @param testResult - Complete test file results including all test cases
    * @description Handles pending/skipped tests and cleans up suite contexts for the completed file.
@@ -201,7 +201,7 @@ var DetoxReporter = class {
   }
   /**
    * Called when the entire Jest test run completes
-   * 
+   *
    * @returns Promise that resolves when all ReportPortal operations are complete
    * @description Processes all queued async operations and finishes the launch in ReportPortal.
    * Ensures all test data is properly synchronized before the reporter shuts down.
@@ -214,7 +214,7 @@ var DetoxReporter = class {
   }
   /**
    * Creates and starts test suites in hierarchical order
-   * 
+   *
    * @param suiteTitles - Array of suite names representing the hierarchy (e.g., ["describe1", "describe2"])
    * @param filePath - Absolute path to the test file
    * @param startTime - Timestamp when the suite execution started
@@ -240,7 +240,7 @@ var DetoxReporter = class {
   }
   /**
    * Starts a single test suite in ReportPortal
-   * 
+   *
    * @param title - The suite title/name
    * @param codeRef - Deterministic code reference for the suite
    * @param parentCodeRef - Code reference of the parent suite (empty string if root level)
@@ -271,7 +271,7 @@ var DetoxReporter = class {
   }
   /**
    * Starts a test step (individual test case) in ReportPortal
-   * 
+   *
    * @param test - Test case start information including titles and timing
    * @param testPath - Absolute path to the test file
    * @description Creates a test step under the appropriate parent suite with deterministic codeRef.
@@ -312,7 +312,7 @@ var DetoxReporter = class {
   }
   /**
    * Finishes a test step with results and artifacts
-   * 
+   *
    * @param test - Test case result containing status and failure information
    * @param testPath - Absolute path to the test file
    * @description Completes the test step in ReportPortal with final status, error logs, and artifacts.
@@ -342,7 +342,7 @@ var DetoxReporter = class {
   }
   /**
    * Sends a log message with optional file attachment to ReportPortal
-   * 
+   *
    * @param params - Object containing log parameters
    * @param params.itemTempId - Temporary ID of the test item to attach the log to
    * @param params.saveLogRQ - Log request object with level and message
@@ -365,7 +365,7 @@ var DetoxReporter = class {
   }
   /**
    * Completes a test step with final status and metadata
-   * 
+   *
    * @param params - Object containing step completion parameters
    * @param params.tempStepId - Temporary ID of the step to finish
    * @param params.fullName - Full name of the test (optional, used for artifact attachment)
@@ -399,7 +399,7 @@ ${error}
   }
   /**
    * Attaches test artifacts (screenshots and videos) to ReportPortal
-   * 
+   *
    * @param fullName - Full test name used to locate artifact files
    * @param tempStepId - Temporary ID of the test step to attach artifacts to
    * @description Searches for and attaches Detox-generated artifacts (PNG screenshots and MP4 videos)
@@ -443,7 +443,7 @@ ${error}
   }
   /**
    * Finishes a test suite in ReportPortal
-   * 
+   *
    * @param tempTestId - Temporary ID of the suite to finish
    * @param key - Storage key for the suite to clean up
    * @description Completes a test suite in ReportPortal and removes it from local storage.
@@ -460,7 +460,7 @@ ${error}
   }
   /**
    * Generate a deterministic codeRef based on file path and test hierarchy
-   * 
+   *
    * @param testPath - The absolute file path of the test
    * @param hierarchy - The test hierarchy string (suite/step names joined with '/')
    * @returns A deterministic codeRef string in format "relative/path/to/file:hierarchy"
@@ -475,7 +475,7 @@ ${error}
   }
   /**
    * Recursively searches for test artifact files in the Detox artifacts directory
-   * 
+   *
    * @param root - Root artifacts directory path to search in
    * @param testFullName - Full test name including suite hierarchy
    * @param fileName - Specific file name to locate (e.g., 'testFnFailure.png', 'test.mp4')

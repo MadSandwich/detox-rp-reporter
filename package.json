@@ -1,6 +1,6 @@
 {
   "name": "detox-rp-reporter",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Jest custom reporter for integrating Detox E2E tests with ReportPortal analytics and reporting",
   "homepage": "https://github.com/MadSandwich/detox-rp-reporter#readme",
   "repository": {
@@ -28,8 +28,8 @@
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
     "test": "vitest",
-    "lint": "biome check --write --staged",
-    "format": "biome format --write --staged",
+    "lint": "biome check --write",
+    "format": "biome format --write",
     "prepublishOnly": "yarn build"
   },
   "author": "Artsem Burlai, artemburlai@gmail.com",
