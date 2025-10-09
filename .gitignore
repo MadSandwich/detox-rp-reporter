@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# ide
+.idea/
+
+coverage/
+
+# package managers
+.npmrc
+.yarnrc
+.yarnrc.yml
+yarn-error.log
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions

@@ -1,0 +1,53 @@
+{
+  "name": "detox-rp-reporter",
+  "version": "1.0.0",
+  "description": "Jest custom reporter for integrating Detox E2E tests with ReportPortal analytics and reporting",
+  "homepage": "https://github.com/MadSandwich/detox-rp-reporter#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MadSandwich/detox-rp-reporter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MadSandwich/detox-rp-reporter/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "engines": {
+    "node": ">=18.x",
+    "yarn": ">=4.x"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "test": "vitest",
+    "lint": "biome check --write --staged",
+    "format": "biome format --write --staged",
+    "prepublishOnly": "yarn build"
+  },
+  "author": "Artsem Burlai, artemburlai@gmail.com",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "dependencies": {
+    "@reportportal/client-javascript": "~5.4.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.2.5",
+    "@jest/reporters": "^30.2.0",
+    "@jest/types": "^30.2.0",
+    "@types/node": "^24.7.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.3"
+  },
+  "packageManager": "yarn@4.10.3"
+}
