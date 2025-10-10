@@ -9,13 +9,32 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
       id-token: write
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0
+
+      - name: Verify package version matches release tag
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          EXPECTED_VERSION="${RELEASE_TAG#v}"
+          
+          echo "Package version: $PACKAGE_VERSION"
+          echo "Release tag: $RELEASE_TAG"
+          echo "Expected version: $EXPECTED_VERSION"
+          
+          if [ "$PACKAGE_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "❌ Version mismatch: package.json has $PACKAGE_VERSION but release tag is $RELEASE_TAG"
+            exit 1
+          else
+            echo "✅ Version match confirmed: $PACKAGE_VERSION"
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -32,17 +51,44 @@ jobs:
       - name: Lint code
         run: yarn lint
 
+      - name: Build package
+        run: yarn build
+
       - name: Publish to NPM
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js for GitHub Packages
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
-          registry-url: https://npm.pkg.github.com/
+          node-version: '20'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@madsandwich'
+
+      - name: Create scoped package.json for GitHub Packages
+        run: |
+          # Backup original package.json
+          cp package.json package-original.json
+          
+          # Create scoped package for GitHub Packages
+          node -e "
+            const pkg = require('./package.json');
+            pkg.name = '@madsandwich/detox-rp-reporter';
+            pkg.publishConfig = {
+              registry: 'https://npm.pkg.github.com'
+            };
+            require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+          "
 
       - name: Publish to GitHub Packages
         run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore original package.json
+        if: always()
+        run: |
+          if [ -f package-original.json ]; then
+            mv package-original.json package.json
+          fi
