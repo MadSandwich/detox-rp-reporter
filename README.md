@@ -1,6 +1,6 @@
 # detox-rp-reporter
 
-[![npm version](https://badge.fury.io/js/detox-rp-reporter.svg)](https://badge.fury.io/js/detox-rp-reporter)
+[![npm version](https://img.shields.io/npm/v/detox-rp-reporter.svg)](https://www.npmjs.com/package/detox-rp-reporter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
 

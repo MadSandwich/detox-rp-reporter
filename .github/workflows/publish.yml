@@ -3,12 +3,6 @@ name: Publish to NPM
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 'Version to publish (e.g., 1.0.1)'
-        required: true
-        type: string
 
 jobs:
   publish:
@@ -38,10 +32,17 @@ jobs:
       - name: Lint code
         run: yarn lint
 
-      - name: Build package
-        run: yarn build
-
       - name: Publish to NPM
         run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://npm.pkg.github.com/
+
+      - name: Publish to GitHub Packages
+        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
