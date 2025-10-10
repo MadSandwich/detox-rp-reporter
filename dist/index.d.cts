@@ -5,20 +5,30 @@ import { ClientConfig, SaveLogRQ, FileObj } from '@reportportal/client-javascrip
 interface ExtendedClientConfig extends ClientConfig {
     artifactsPath?: string | undefined;
     extendTestDescriptionWithLastError: boolean;
+    saveToFile?: boolean;
+    cacheFilePath?: string;
 }
 declare class DetoxReporter implements Reporter {
     private readonly reportOptions;
     private readonly client;
     private asyncQueue;
     private storage;
+    private cachedCommands;
+    private cacheFilePath;
+    private saveToFile;
     constructor(_globalConfig: Config.GlobalConfig, options: Partial<ExtendedClientConfig>);
     /**
      * Called when Jest test run starts
      *
      * @description Initiates a new launch in ReportPortal with configured attributes and description.
      * Sets up the launch ID in storage for subsequent test items to reference.
+     * Always caches commands for replay capability.
      */
     onRunStart(): void;
+    /**
+     * Saves cached commands to file if saveToFile option is enabled
+     */
+    private saveCacheToFile;
     /**
      * Called when a test case starts execution
      *
@@ -150,17 +160,24 @@ declare class DetoxReporter implements Reporter {
      */
     private buildCodeReference;
     /**
-     * Recursively searches for test artifact files in the Detox artifacts directory
+     * Finds the artifact folder for a test using Detox's exact folder naming convention
      *
      * @param root - Root artifacts directory path to search in
-     * @param testFullName - Full test name including suite hierarchy
-     * @param fileName - Specific file name to locate (e.g., 'testFnFailure.png', 'test.mp4')
-     * @returns Full path to the artifact file if found, null otherwise
-     * @description Implements intelligent artifact discovery using Detox naming conventions.
-     * Searches for folders matching the test failure pattern and locates specific artifact files.
-     * Handles various folder naming patterns and recursively searches subdirectories.
+     * @param testFullName - Full test name from Jest (test.fullName)
+     * @returns Full path to the artifact folder if found, null otherwise
+     * @description Uses Detox's ArtifactPathBuilder logic to find the test's artifact folder.
+     * Detox creates folders directly in the artifacts directory with pattern: "✗ {sanitized test fullName}"
      */
-    private retrieveFilePath;
+    private findArtifactFolder;
+    /**
+     * Sanitizes filename using the same logic as Detox's sanitize-filename with replacement: '_'
+     * This mimics the constructSafeFilename function from Detox
+     */
+    private sanitizeFilename;
+    /**
+     * Caches a ReportPortal command for later execution
+     */
+    private cacheCommand;
 }
 
 export { DetoxReporter as default };

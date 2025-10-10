@@ -35,7 +35,7 @@ __export(index_exports, {
 module.exports = __toCommonJS(index_exports);
 
 // src/DetoxReporter.ts
-var import_node_fs = __toESM(require("fs"), 1);
+var import_node_fs2 = __toESM(require("fs"), 1);
 var import_node_path = __toESM(require("path"), 1);
 var import_client_javascript = __toESM(require("@reportportal/client-javascript"), 1);
 
@@ -57,6 +57,123 @@ var AsyncQueue = class {
     return Promise.all(this.queue);
   }
 };
+
+// src/helper/OfflineMod.ts
+var import_node_fs = __toESM(require("fs"), 1);
+function generateReplayScript(cacheFilePath, outputScriptPath = "./rp-replay.js") {
+  const replayScript = `#!/usr/bin/env node
+/**
+ * ReportPortal Replay Script
+ * 
+ * This script replays cached ReportPortal commands when the service becomes available.
+ * Generated automatically by DetoxReporter offline mode.
+ * 
+ * Usage: node rp-replay.js [cache-file-path]
+ */
+
+const fs = require('fs');
+const RPClient = require('@reportportal/client-javascript').default;
+
+async function replayCommands(cacheFilePath) {
+    try {
+        console.log('Loading cached commands from:', cacheFilePath);
+        const cacheData = JSON.parse(fs.readFileSync(cacheFilePath, 'utf8'));
+        
+        const client = new RPClient(cacheData.reportOptions);
+        const commands = cacheData.commands;
+        const tempIdMap = new Map(); // Map cached tempIds to real ones
+        
+        console.log(\`Replaying \${commands.length} commands...\`);
+        
+        for (const command of commands) {
+            console.log(\`Executing: \${command.type} at \${new Date(command.timestamp).toISOString()}\`);
+            
+            try {
+                switch (command.type) {
+                    case 'startLaunch': {
+                        const { tempId, promise } = client.startLaunch(command.data);
+                        await promise;
+                        if (command.tempId) {
+                            tempIdMap.set(command.tempId, tempId);
+                        }
+                        break;
+                    }
+                    
+                    case 'startTestItem': {
+                        const launchId = command.launchId ? tempIdMap.get(command.launchId) : undefined;
+                        const parentId = command.parentId ? tempIdMap.get(command.parentId) : undefined;
+                        
+                        const { tempId, promise } = client.startTestItem(command.data, launchId, parentId);
+                        await promise;
+                        if (command.tempId) {
+                            tempIdMap.set(command.tempId, tempId);
+                        }
+                        break;
+                    }
+                    
+                    case 'finishTestItem': {
+                        const itemId = command.tempId ? tempIdMap.get(command.tempId) : undefined;
+                        if (itemId) {
+                            const { promise } = client.finishTestItem(itemId, command.data);
+                            await promise;
+                        }
+                        break;
+                    }
+                    
+                    case 'sendLog': {
+                        const itemId = command.tempId ? tempIdMap.get(command.tempId) : undefined;
+                        if (itemId) {
+                            const { promise } = client.sendLog(itemId, command.data, command.fileData);
+                            await promise;
+                        }
+                        break;
+                    }
+                    
+                    case 'finishLaunch': {
+                        const launchId = command.launchId ? tempIdMap.get(command.launchId) : undefined;
+                        if (launchId) {
+                            const { promise } = client.finishLaunch(launchId, command.data);
+                            await promise;
+                        }
+                        break;
+                    }
+                }
+                
+                // Small delay to avoid overwhelming the server
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+            } catch (error) {
+                console.error(\`Error executing \${command.type}:\`, error);
+                // Continue with next command
+            }
+        }
+        
+        console.log('Replay completed successfully!');
+        
+        // Optionally backup the cache file
+        const backupPath = cacheFilePath + '.completed.' + Date.now();
+        fs.renameSync(cacheFilePath, backupPath);
+        console.log(\`Cache file backed up to: \${backupPath}\`);
+        
+    } catch (error) {
+        console.error('Failed to replay commands:', error);
+        process.exit(1);
+    }
+}
+
+// Main execution
+const cacheFile = process.argv[2] || '${cacheFilePath}';
+replayCommands(cacheFile);
+`;
+  try {
+    import_node_fs.default.writeFileSync(outputScriptPath, replayScript);
+    import_node_fs.default.chmodSync(outputScriptPath, "755");
+    console.log(`Replay script generated: ${outputScriptPath}`);
+    console.log(`Usage: node ${outputScriptPath} [cache-file-path]`);
+  } catch (error) {
+    console.error("Failed to generate replay script:", error);
+  }
+}
 
 // src/Storage.ts
 var Storage = class {
@@ -98,14 +215,19 @@ var DetoxReporter = class {
   client;
   asyncQueue;
   storage;
+  cachedCommands;
+  cacheFilePath;
+  saveToFile;
   constructor(_globalConfig, options) {
     this.reportOptions = {
       apiKey: process.env.RP_API_KEY ?? options.apiKey ?? "",
       artifactsPath: process.env.DETOX_ARTIFACTS_PATH ?? options.artifactsPath,
+      cacheFilePath: options.cacheFilePath ?? "./rp-cache.json",
       endpoint: process.env.RP_ENDPOINT ?? options.endpoint ?? "",
       extendTestDescriptionWithLastError: options.extendTestDescriptionWithLastError ?? true,
       launch: process.env.RP_LAUNCH ?? options.launch ?? "",
       project: process.env.RP_PROJECT_NAME ?? options.project ?? "Detox Agent Reporter",
+      saveToFile: options.saveToFile ?? false,
       ...options.attributes && { attributes: options.attributes },
       ...options.debug !== void 0 && { debug: options.debug },
       ...options.description && { description: process.env.RP_DESCRIPTION ?? options.description },
@@ -119,23 +241,56 @@ var DetoxReporter = class {
     this.client = new import_client_javascript.default(this.reportOptions);
     this.asyncQueue = new AsyncQueue();
     this.storage = new Storage();
+    this.cachedCommands = [];
+    this.cacheFilePath = this.reportOptions.cacheFilePath ?? "./rp-cache.json";
+    this.saveToFile = this.reportOptions.saveToFile ?? false;
   }
   /**
    * Called when Jest test run starts
    *
    * @description Initiates a new launch in ReportPortal with configured attributes and description.
    * Sets up the launch ID in storage for subsequent test items to reference.
+   * Always caches commands for replay capability.
    */
   onRunStart() {
-    const { tempId, promise } = this.client.startLaunch({
+    const launchData = {
       attributes: this.reportOptions.attributes ?? [],
       description: this.reportOptions.description ?? "",
       mode: this.reportOptions.mode ?? "DEFAULT",
       startTime: Date.now()
-    });
+    };
+    const { tempId, promise } = this.client.startLaunch(launchData);
     this.storage.setItem("launchId", tempId);
+    this.cacheCommand({ data: launchData, tempId, type: "startLaunch" });
     this.asyncQueue.catchAndLogError(promise, "Error starting launch: ");
     this.asyncQueue.enqueue(promise);
+  }
+  /**
+   * Saves cached commands to file if saveToFile option is enabled
+   */
+  saveCacheToFile() {
+    if (!this.saveToFile) {
+      return;
+    }
+    try {
+      const cacheData = {
+        commands: this.cachedCommands,
+        reportOptions: this.reportOptions,
+        timestamp: Date.now()
+      };
+      const cacheDir = import_node_path.default.dirname(this.cacheFilePath);
+      if (!import_node_fs2.default.existsSync(cacheDir)) {
+        import_node_fs2.default.mkdirSync(cacheDir, { recursive: true });
+      }
+      import_node_fs2.default.writeFileSync(this.cacheFilePath, JSON.stringify(cacheData, null, 2));
+      console.log(`Cached ${this.cachedCommands.length} ReportPortal commands to ${this.cacheFilePath}`);
+      if (this.cachedCommands.length > 0) {
+        const replayScriptPath = this.cacheFilePath.replace(".json", "-replay.js");
+        generateReplayScript(this.cacheFilePath, replayScriptPath);
+      }
+    } catch (error) {
+      console.error("Failed to save cache to file:", error);
+    }
   }
   /**
    * Called when a test case starts execution
@@ -207,10 +362,14 @@ var DetoxReporter = class {
    * Ensures all test data is properly synchronized before the reporter shuts down.
    */
   async onRunComplete() {
+    this.saveCacheToFile();
+    const launchId = this.storage.getItem("launchId");
+    this.cacheCommand({ data: { endTime: Date.now() }, launchId, type: "finishLaunch" });
     await this.asyncQueue.process();
-    const { promise } = this.client.finishLaunch(this.storage.getItem("launchId"), { endTime: Date.now() });
+    const { promise } = this.client.finishLaunch(launchId, { endTime: Date.now() });
     this.asyncQueue.catchAndLogError(promise, "Error finishing launch: ");
     await promise;
+    console.log(`Test run completed. Commands cached in memory ${this.saveToFile ? `and saved to ${this.cacheFilePath}` : ""} for replay capability.`);
   }
   /**
    * Creates and starts test suites in hierarchical order
@@ -255,17 +414,22 @@ var DetoxReporter = class {
     }
     const parentKey = `suite_${parentCodeRef}`;
     const parentId = parentCodeRef ? this.storage.getItem(parentKey) : void 0;
-    const { tempId, promise } = this.client.startTestItem(
-      {
-        codeRef,
-        name: title,
-        startTime,
-        type: TEST_ITEM_TYPES.SUITE
-      },
-      this.storage.getItem("launchId"),
-      parentId
-    );
+    const launchId = this.storage.getItem("launchId");
+    const testItemData = {
+      codeRef,
+      name: title,
+      startTime,
+      type: TEST_ITEM_TYPES.SUITE
+    };
+    const { tempId, promise } = this.client.startTestItem(testItemData, launchId, parentId);
     this.storage.setItem(suiteKey, tempId);
+    this.cacheCommand({
+      data: testItemData,
+      launchId,
+      tempId,
+      type: "startTestItem",
+      ...parentId && { parentId }
+    });
     this.asyncQueue.catchAndLogError(promise);
     this.asyncQueue.enqueue(promise);
   }
@@ -293,20 +457,26 @@ var DetoxReporter = class {
     const parentCodeRef = this.storage.getItem(`suiteContext_${parentSuiteContextKey}`);
     const parentKey = `suite_${parentCodeRef}`;
     const parentId = parentCodeRef ? this.storage.getItem(parentKey) : void 0;
-    const { tempId, promise } = this.client.startTestItem(
-      {
-        codeRef: storedCodeRef,
-        name: test.title,
-        retry: isRetried,
-        startTime: test.startedAt ?? Date.now(),
-        type: TEST_ITEM_TYPES.STEP
-      },
-      this.storage.getItem("launchId"),
-      parentId
-    );
-    let tempIdToStore = [tempId];
-    if (isRetried) tempIdToStore = retryIds.concat(tempIdToStore);
+    const launchId = this.storage.getItem("launchId");
+    const testItemData = {
+      codeRef: storedCodeRef,
+      name: test.title,
+      retry: isRetried,
+      startTime: test.startedAt ?? Date.now(),
+      type: TEST_ITEM_TYPES.STEP
+    };
+    let tempIdToStore;
+    const { tempId, promise } = this.client.startTestItem(testItemData, launchId, parentId);
+    tempIdToStore = [tempId];
+    if (isRetried && retryIds) tempIdToStore = retryIds.concat(tempIdToStore);
     this.storage.setItem(stepKey, tempIdToStore);
+    this.cacheCommand({
+      data: testItemData,
+      launchId,
+      tempId,
+      type: "startTestItem",
+      ...parentId && { parentId }
+    });
     this.asyncQueue.catchAndLogError(promise);
     this.asyncQueue.enqueue(promise);
   }
@@ -351,15 +521,24 @@ var DetoxReporter = class {
    * Supports file attachments for visual artifacts.
    */
   sendLog({ saveLogRQ, fileObj, itemTempId }) {
-    const { promise } = this.client.sendLog(
-      itemTempId,
-      {
-        level: saveLogRQ.level ?? LOG_LEVEL.INFO,
-        message: saveLogRQ.message ?? "",
-        time: this.client.helpers.now()
-      },
-      fileObj
-    );
+    const logData = {
+      level: saveLogRQ.level ?? LOG_LEVEL.INFO,
+      message: saveLogRQ.message ?? "",
+      time: this.client.helpers.now()
+    };
+    this.cacheCommand({
+      data: logData,
+      tempId: itemTempId,
+      type: "sendLog",
+      ...fileObj && {
+        fileData: {
+          content: fileObj.content,
+          name: fileObj.name,
+          type: fileObj.type
+        }
+      }
+    });
+    const { promise } = this.client.sendLog(itemTempId, logData, fileObj);
     this.asyncQueue.catchAndLogError(promise);
     this.asyncQueue.enqueue(promise);
   }
@@ -389,11 +568,13 @@ ${error}
       });
     }
     fullName && this.attachArtifacts(fullName, tempStepId);
-    const { promise } = this.client.finishTestItem(tempStepId, {
+    const finishData = {
       status,
       ...issue && { issue },
       ...description && { description }
-    });
+    };
+    this.cacheCommand({ data: finishData, tempId: tempStepId, type: "finishTestItem" });
+    const { promise } = this.client.finishTestItem(tempStepId, finishData);
     this.asyncQueue.catchAndLogError(promise);
     this.asyncQueue.enqueue(promise);
   }
@@ -407,37 +588,40 @@ ${error}
    */
   attachArtifacts(fullName, tempStepId) {
     if (this.reportOptions.artifactsPath) {
-      const imagePath = this.retrieveFilePath(this.reportOptions.artifactsPath, fullName, "testFnFailure.png");
-      const videoPath = this.retrieveFilePath(this.reportOptions.artifactsPath, fullName, "test.mp4");
-      if (imagePath) {
-        const image = {
-          content: import_node_fs.default.readFileSync(imagePath).toString("base64"),
-          name: "testFnFailure.png",
-          type: "image/png"
-        };
-        this.sendLog({
-          fileObj: image,
-          itemTempId: tempStepId,
-          saveLogRQ: {
-            level: LOG_LEVEL.ERROR,
-            message: "Screenshot:"
-          }
-        });
-      }
-      if (videoPath) {
-        const video = {
-          content: import_node_fs.default.readFileSync(videoPath).toString("base64"),
-          name: "test.mp4",
-          type: "video/mp4"
-        };
-        this.sendLog({
-          fileObj: video,
-          itemTempId: tempStepId,
-          saveLogRQ: {
-            level: LOG_LEVEL.ERROR,
-            message: "Video:"
-          }
-        });
+      const artifactFolder = this.findArtifactFolder(this.reportOptions.artifactsPath, fullName);
+      if (artifactFolder) {
+        const imagePath = import_node_path.default.join(artifactFolder, "testFnFailure.png");
+        if (import_node_fs2.default.existsSync(imagePath)) {
+          const image = {
+            content: import_node_fs2.default.readFileSync(imagePath).toString("base64"),
+            name: "testFnFailure.png",
+            type: "image/png"
+          };
+          this.sendLog({
+            fileObj: image,
+            itemTempId: tempStepId,
+            saveLogRQ: {
+              level: LOG_LEVEL.ERROR,
+              message: "Screenshot:"
+            }
+          });
+        }
+        const videoPath = import_node_path.default.join(artifactFolder, "test.mp4");
+        if (import_node_fs2.default.existsSync(videoPath)) {
+          const video = {
+            content: import_node_fs2.default.readFileSync(videoPath).toString("base64"),
+            name: "test.mp4",
+            type: "video/mp4"
+          };
+          this.sendLog({
+            fileObj: video,
+            itemTempId: tempStepId,
+            saveLogRQ: {
+              level: LOG_LEVEL.ERROR,
+              message: "Video:"
+            }
+          });
+        }
       }
     }
   }
@@ -453,10 +637,12 @@ ${error}
     if (!tempTestId) {
       return;
     }
-    const { promise } = this.client.finishTestItem(tempTestId, { endTime: Date.now() });
-    this.storage.removeItem(key);
+    const finishData = { endTime: Date.now() };
+    this.cacheCommand({ data: finishData, tempId: tempTestId, type: "finishTestItem" });
+    const { promise } = this.client.finishTestItem(tempTestId, finishData);
     this.asyncQueue.catchAndLogError(promise);
     this.asyncQueue.enqueue(promise);
+    this.storage.removeItem(key);
   }
   /**
    * Generate a deterministic codeRef based on file path and test hierarchy
@@ -474,59 +660,65 @@ ${error}
     return `${cleanPath}:${hierarchy}`;
   }
   /**
-   * Recursively searches for test artifact files in the Detox artifacts directory
+   * Finds the artifact folder for a test using Detox's exact folder naming convention
    *
    * @param root - Root artifacts directory path to search in
-   * @param testFullName - Full test name including suite hierarchy
-   * @param fileName - Specific file name to locate (e.g., 'testFnFailure.png', 'test.mp4')
-   * @returns Full path to the artifact file if found, null otherwise
-   * @description Implements intelligent artifact discovery using Detox naming conventions.
-   * Searches for folders matching the test failure pattern and locates specific artifact files.
-   * Handles various folder naming patterns and recursively searches subdirectories.
+   * @param testFullName - Full test name from Jest (test.fullName)
+   * @returns Full path to the artifact folder if found, null otherwise
+   * @description Uses Detox's ArtifactPathBuilder logic to find the test's artifact folder.
+   * Detox creates folders directly in the artifacts directory with pattern: "✗ {sanitized test fullName}"
    */
-  retrieveFilePath(root, testFullName, fileName) {
-    const parts = testFullName.split(" ");
-    const testName = parts[parts.length - 1];
-    const suiteParts = parts.slice(0, -1);
-    const suiteNameConverted = suiteParts.join(" ").replace(/:\s*/g, "_ ");
-    const expectedFolderName = `\u2717 ${suiteNameConverted} ${testName}`;
-    const searchRecursively = (dir, depth = 0) => {
-      if (depth > 5) {
-        return null;
+  findArtifactFolder(root, testFullName) {
+    try {
+      const prefix = "\u2717 ";
+      const sanitizedTestName = this.sanitizeFilename(testFullName);
+      const expectedFolderName = `${prefix}${sanitizedTestName}`;
+      let expectedPath = import_node_path.default.join(root, expectedFolderName);
+      if (import_node_fs2.default.existsSync(expectedPath)) {
+        return expectedPath;
       }
-      try {
-        const entries = import_node_fs.default.readdirSync(dir, { withFileTypes: true });
-        for (const entry of entries) {
-          if (entry.isDirectory() && entry.name === expectedFolderName) {
-            const candidatePath = import_node_path.default.join(dir, entry.name, fileName);
-            if (import_node_fs.default.existsSync(candidatePath)) {
-              return candidatePath;
-            }
-          }
+      const transformedTestName = testFullName.replace(/^(\w+)\s/, "$1_ ");
+      const transformedSanitized = this.sanitizeFilename(transformedTestName);
+      const transformedFolderName = `${prefix}${transformedSanitized}`;
+      expectedPath = import_node_path.default.join(root, transformedFolderName);
+      if (import_node_fs2.default.existsSync(expectedPath)) {
+        return expectedPath;
+      }
+      const entries = import_node_fs2.default.readdirSync(root, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name.startsWith("\u2717")) {
+          return import_node_path.default.join(root, entry.name);
         }
-        for (const entry of entries) {
-          if (entry.isDirectory() && entry.name.includes("\u2717") && entry.name.includes(testName)) {
-            const candidatePath = import_node_path.default.join(dir, entry.name, fileName);
-            if (import_node_fs.default.existsSync(candidatePath)) {
-              return candidatePath;
-            }
-          }
-        }
-        for (const entry of entries) {
-          if (entry.isDirectory()) {
-            const fullPath = import_node_path.default.join(dir, entry.name);
-            const result = searchRecursively(fullPath, depth + 1);
-            if (result) {
-              return result;
-            }
-          }
-        }
-      } catch (error) {
-        console.error(`[findFile] Error reading directory ${dir}:`, error);
       }
       return null;
+    } catch {
+      return null;
+    }
+  }
+  /**
+   * Sanitizes filename using the same logic as Detox's sanitize-filename with replacement: '_'
+   * This mimics the constructSafeFilename function from Detox
+   */
+  sanitizeFilename(input) {
+    return input.replace(/[<>:"/\\|?*]/g, "_").replace(/^\.+$/, "_").replace(/\.$/, "_").trim();
+  }
+  /**
+   * Caches a ReportPortal command for later execution
+   */
+  cacheCommand(params) {
+    const command = {
+      data: params.data,
+      timestamp: Date.now(),
+      type: params.type,
+      ...params.tempId && { tempId: params.tempId },
+      ...params.launchId && { launchId: params.launchId },
+      ...params.parentId && { parentId: params.parentId },
+      ...params.fileData && { fileData: params.fileData }
     };
-    return searchRecursively(root);
+    this.cachedCommands.push(command);
+    if (this.saveToFile && (params.type === "startLaunch" || params.type === "finishLaunch" || this.cachedCommands.length % 10 === 0)) {
+      this.saveCacheToFile();
+    }
   }
 };
 
