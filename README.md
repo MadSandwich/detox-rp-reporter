@@ -1,6 +1,6 @@
-# agent-ts-detox
+# detox-rp-reporter
 
-[![npm version](https://badge.fury.io/js/agent-ts-detox.svg)](https://badge.fury.io/js/agent-ts-detox)
+[![npm version](https://badge.fury.io/js/detox-rp-reporter.svg)](https://badge.fury.io/js/detox-rp-reporter)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org/)
 
@@ -12,6 +12,8 @@ A TypeScript-based Detox Reporter for ReportPortal test results uploader using J
 * **Detox Integration**: Specifically designed for Detox mobile testing framework  
 * **Jest Reporter**: Works as a Jest custom reporter
 * **ReportPortal Integration**: Uploads test results directly to ReportPortal
+* **Always-Cache Mode**: All commands cached in memory for replay capability
+* **Optional File Persistence**: Save cached commands to file when needed
 * **Artifact Support**: Automatically attaches screenshots and videos from failed tests
 * **Async Queue Processing**: Efficient handling of test result uploads
 * **UUID-based Identifiers**: Reliable test item identification system
@@ -21,10 +23,10 @@ A TypeScript-based Detox Reporter for ReportPortal test results uploader using J
 
 ```bash
 # Using yarn (recommended)
-yarn add -D agent-ts-detox
+yarn add -D detox-rp-reporter
 
 # Using npm
-npm install --save-dev agent-ts-detox
+npm install --save-dev detox-rp-reporter
 ```
 
 ## Configuration
@@ -57,7 +59,7 @@ module.exports = {
   // ... other Jest configuration
   reporters: [
     'default',
-    ['agent-ts-detox', {
+    ['detox-rp-reporter', {
       endpoint: process.env.RP_ENDPOINT,
       apiKey: process.env.RP_API_KEY,
       project: process.env.RP_PROJECT_NAME,
@@ -155,7 +157,7 @@ Artifacts are searched in the Detox artifacts directory structure:
 ```javascript
 {
   "reporters": [
-    ["agent-ts-detox", {
+    ["detox-rp-reporter", {
       "launchId": "existing-launch-uuid"
       // ... other options
     }]
@@ -168,7 +170,7 @@ Artifacts are searched in the Detox artifacts directory structure:
 ```javascript
 {
   "reporters": [
-    ["agent-ts-detox", {
+    ["detox-rp-reporter", {
       "rerun": true,
       "rerunOf": "failed-launch-uuid"
       // ... other options
@@ -229,7 +231,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Issues
 
-If you encounter any issues, please report them on [GitHub Issues](https://github.com/MadSandwich/agent-ts-detox/issues).
+If you encounter any issues, please report them on [GitHub Issues](https://github.com/MadSandwich/detox-rp-reporter/issues).
 
 ## Support
 
@@ -237,7 +239,7 @@ For questions and support, please contact:
 
 * **Author**: Artsem Burlai
 * **Email**: <artemburlai@gmail.com>
-* **Repository**: [agent-ts-detox](https://github.com/MadSandwich/agent-ts-detox)
+* **Repository**: [detox-rp-reporter](https://github.com/MadSandwich/detox-rp-reporter)
 
 ## Acknowledgments
 
