@@ -78,13 +78,17 @@ jobs:
             pkg.publishConfig = {
               registry: 'https://npm.pkg.github.com'
             };
+            // Remove yarn-specific scripts that cause issues with scoped packages
+            pkg.scripts = {
+              ...pkg.scripts,
+              prepublishOnly: 'echo \"Build already completed, skipping yarn build\"'
+            };
             require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
           "
 
       - name: Publish to GitHub Packages
         run: npm publish
         env:
-          REGISTRY_URL: 'https://npm.pkg.github.com'
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore original package.json
