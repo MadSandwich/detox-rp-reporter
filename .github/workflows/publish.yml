@@ -84,6 +84,7 @@ jobs:
       - name: Publish to GitHub Packages
         run: npm publish
         env:
+          REGISTRY_URL: 'https://npm.pkg.github.com'
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore original package.json
