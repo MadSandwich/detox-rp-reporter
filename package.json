@@ -1,6 +1,6 @@
 {
   "name": "detox-rp-reporter",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Jest custom reporter for integrating Detox E2E tests with ReportPortal analytics and reporting",
   "homepage": "https://github.com/MadSandwich/detox-rp-reporter#readme",
   "repository": {
