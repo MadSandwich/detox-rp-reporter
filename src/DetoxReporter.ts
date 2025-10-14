@@ -494,22 +494,32 @@ export default class DetoxReporter implements Reporter {
 			const artifactFolder = this.findArtifactFolder(this.reportOptions.artifactsPath, fullName)
 
 			if (artifactFolder) {
-				// Check for screenshot
-				const imagePath = path.join(artifactFolder, 'testFnFailure.png')
-				if (fs.existsSync(imagePath)) {
-					const image = {
-						content: fs.readFileSync(imagePath).toString('base64'),
-						name: 'testFnFailure.png',
-						type: 'image/png',
+				// Check for all screenshot files
+				try {
+					const files = fs.readdirSync(artifactFolder)
+					const pngFiles = files.filter(file => path.extname(file).toLowerCase() === '.png')
+
+					for (const pngFile of pngFiles) {
+						const imagePath = path.join(artifactFolder, pngFile)
+						if (fs.existsSync(imagePath)) {
+							const fileNameWithoutExt = path.basename(pngFile, path.extname(pngFile))
+							const image = {
+								content: fs.readFileSync(imagePath).toString('base64'),
+								name: pngFile,
+								type: 'image/png',
+							}
+							this.sendLog({
+								fileObj: image,
+								itemTempId: tempStepId,
+								saveLogRQ: {
+									level: LOG_LEVEL.ERROR,
+									message: fileNameWithoutExt,
+								},
+							})
+						}
 					}
-					this.sendLog({
-						fileObj: image,
-						itemTempId: tempStepId,
-						saveLogRQ: {
-							level: LOG_LEVEL.ERROR,
-							message: 'Screenshot:',
-						},
-					})
+				} catch (error) {
+					console.warn(`Failed to read PNG files from artifact folder: ${artifactFolder}`, error)
 				}
 
 				// Check for video
