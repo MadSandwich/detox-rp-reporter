@@ -15,9 +15,45 @@ export interface CachedCommand {
 }
 
 export default function generateReplayScript(cacheFilePath: string, outputScriptPath = './rp-replay.js'): void {
-	const replayScript = `#!/usr/bin/env node
+	// Detect if the current project uses ES modules
+	const isESModule = detectESModule()
+
+	const replayScript = generateScript(cacheFilePath, isESModule)
+
+	try {
+		fs.writeFileSync(outputScriptPath, replayScript)
+		fs.chmodSync(outputScriptPath, '755') // Make executable
+		console.log(`Replay script generated: ${outputScriptPath} (${isESModule ? 'ES Module' : 'CommonJS'})`)
+		console.log(`Usage: node ${outputScriptPath} [cache-file-path]`)
+	} catch (error) {
+		console.error('Failed to generate replay script:', error)
+	}
+}
+
+function detectESModule(): boolean {
+	try {
+		// Check if package.json has "type": "module"
+		const packageJsonPath = './package.json'
+		if (fs.existsSync(packageJsonPath)) {
+			const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'))
+			return packageJson.type === 'module'
+		}
+	} catch {
+		console.warn('Could not detect module type, defaulting to CommonJS')
+	}
+	return false
+}
+
+function generateScript(cacheFilePath: string, isESModule: boolean): string {
+	const imports = isESModule
+		? `import fs from 'fs';\nimport RPClient from '@reportportal/client-javascript';`
+		: `const fs = require('fs');\nconst RPClient = require('@reportportal/client-javascript').default;`
+
+	const moduleType = isESModule ? 'ES Module' : 'CommonJS'
+
+	return `#!/usr/bin/env node
 /**
- * ReportPortal Replay Script
+ * ReportPortal Replay Script (${moduleType})
  * 
  * This script replays cached ReportPortal commands when the service becomes available.
  * Generated automatically by DetoxReporter offline mode.
@@ -25,10 +61,18 @@ export default function generateReplayScript(cacheFilePath: string, outputScript
  * Usage: node rp-replay.js [cache-file-path]
  */
 
-const fs = require('fs');
-const RPClient = require('@reportportal/client-javascript').default;
+${imports}
 
-async function replayCommands(cacheFilePath) {
+${getReplayFunction()}
+
+// Main execution
+const cacheFile = process.argv[2] || '${cacheFilePath}';
+replayCommands(cacheFile);
+`
+}
+
+function getReplayFunction(): string {
+	return `async function replayCommands(cacheFilePath) {
     try {
         console.log('Loading cached commands from:', cacheFilePath);
         const cacheData = JSON.parse(fs.readFileSync(cacheFilePath, 'utf8'));
@@ -113,19 +157,5 @@ async function replayCommands(cacheFilePath) {
         console.error('Failed to replay commands:', error);
         process.exit(1);
     }
-}
-
-// Main execution
-const cacheFile = process.argv[2] || '${cacheFilePath}';
-replayCommands(cacheFile);
-`
-
-	try {
-		fs.writeFileSync(outputScriptPath, replayScript)
-		fs.chmodSync(outputScriptPath, '755') // Make executable
-		console.log(`Replay script generated: ${outputScriptPath}`)
-		console.log(`Usage: node ${outputScriptPath} [cache-file-path]`)
-	} catch (error) {
-		console.error('Failed to generate replay script:', error)
-	}
+}`
 }
