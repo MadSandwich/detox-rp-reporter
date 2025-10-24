@@ -702,9 +702,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@reportportal/client-javascript@npm:~5.4.2":
-  version: 5.4.2
-  resolution: "@reportportal/client-javascript@npm:5.4.2"
+"@reportportal/client-javascript@npm:~5.4.3":
+  version: 5.4.3
+  resolution: "@reportportal/client-javascript@npm:5.4.3"
   dependencies:
     axios: "npm:^1.12.2"
     axios-retry: "npm:^4.5.0"
@@ -712,7 +712,7 @@ __metadata:
     ini: "npm:^2.0.0"
     uniqid: "npm:^5.4.0"
     uuid: "npm:^9.0.1"
-  checksum: 10/475dfa70f9cc3a71100d9a81122e1be0605834805f9903b2da828eb5a5b94f5cfc8c30245871b28acba0038b49e231b8ae7cfcc02c3d05664a0dbb8d4e86de82
+  checksum: 10/293a006410cc9b70313a478796020a3a6b3352f1ba6ede75b418bc13e00b54129f7fd9914c1a82105234a3d3def802ca5a324a903b8b09725dcd1abfe2cb20f9
   languageName: node
   linkType: hard
 
@@ -1364,7 +1364,7 @@ __metadata:
     "@biomejs/biome": "npm:^2.2.5"
     "@jest/reporters": "npm:^30.2.0"
     "@jest/types": "npm:^30.2.0"
-    "@reportportal/client-javascript": "npm:~5.4.2"
+    "@reportportal/client-javascript": "npm:~5.4.3"
     "@types/node": "npm:^24.7.0"
     tsup: "npm:^8.5.0"
     typescript: "npm:^5.9.3"
