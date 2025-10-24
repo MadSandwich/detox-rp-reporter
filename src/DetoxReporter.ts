@@ -26,6 +26,7 @@ interface ExtendedClientConfig extends ClientConfig {
 	extendTestDescriptionWithLastError: boolean
 	saveToFile?: boolean
 	cacheFilePath?: string
+	offlineMode?: boolean
 }
 
 export default class DetoxReporter implements Reporter {
@@ -35,19 +36,19 @@ export default class DetoxReporter implements Reporter {
 	private asyncQueue: AsyncQueue<unknown>
 	private storage: Storage
 	private cachedCommands: CachedCommand[]
-	private cacheFilePath: string
-	private saveToFile: boolean
+	private failedTests: Map<string, { fullName: string; tempStepId: string; error?: string; issue?: { issueType: string }; description?: string }>
 
 	constructor(_globalConfig: Config.GlobalConfig, options: Partial<ExtendedClientConfig>) {
 		this.reportOptions = {
 			apiKey: process.env.RP_API_KEY ?? options.apiKey ?? '',
-			artifactsPath: process.env.DETOX_ARTIFACTS_PATH ?? options.artifactsPath,
+			artifactsPath: process.env.DETOX_ARTIFACTS_PATH ?? '.artifacts',
 			cacheFilePath: options.cacheFilePath ?? './rp-cache.json',
 			endpoint: process.env.RP_ENDPOINT ?? options.endpoint ?? '',
 			extendTestDescriptionWithLastError: options.extendTestDescriptionWithLastError ?? true,
 			launch: process.env.RP_LAUNCH ?? options.launch ?? '',
+			offlineMode: options.offlineMode ?? false,
 			project: process.env.RP_PROJECT_NAME ?? options.project ?? 'Detox Agent Reporter',
-			saveToFile: options.saveToFile ?? false,
+			saveToFile: options.saveToFile ?? true,
 			...(options.attributes && { attributes: options.attributes }),
 			...(options.debug !== undefined && { debug: options.debug }),
 			...(options.description && { description: process.env.RP_DESCRIPTION ?? options.description }),
@@ -55,7 +56,13 @@ export default class DetoxReporter implements Reporter {
 			...(options.launchUuidPrint !== undefined && { launchUuidPrint: options.launchUuidPrint }),
 			...(options.launchUuidPrintOutput && { launchUuidPrintOutput: options.launchUuidPrintOutput }),
 			...(options.mode && { mode: process.env.RP_MODE || options.mode }),
-			...(options.restClientConfig && { restClientConfig: options.restClientConfig }),
+			...(options.restClientConfig && {
+				restClientConfig: {
+					...options.restClientConfig,
+					// Enable debug logging to see actual API calls
+					debug: options.restClientConfig.debug ?? options.debug ?? false,
+				},
+			}),
 			...(options.skippedIssue !== undefined && { skippedIssue: options.skippedIssue }),
 		}
 
@@ -65,8 +72,9 @@ export default class DetoxReporter implements Reporter {
 
 		// Initialize caching properties
 		this.cachedCommands = []
-		this.cacheFilePath = this.reportOptions.cacheFilePath ?? './rp-cache.json'
-		this.saveToFile = this.reportOptions.saveToFile ?? false
+		this.failedTests = new Map() // Log mode on startup
+		if (this.reportOptions.offlineMode) {
+		}
 	}
 
 	/**
@@ -84,21 +92,28 @@ export default class DetoxReporter implements Reporter {
 			startTime: Date.now(),
 		}
 
-		// Always send to ReportPortal and cache for replay capability
-		const { tempId, promise } = this.client.startLaunch(launchData)
-		this.storage.setItem('launchId', tempId)
+		let tempId: string
 
+		if (this.reportOptions.offlineMode) {
+			// In offline mode, generate our own tempId without calling ReportPortal
+			tempId = `offline-launch-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
+		} else {
+			// In normal mode, call ReportPortal and get real tempId
+			const { tempId: rpTempId, promise } = this.client.startLaunch(launchData)
+			tempId = rpTempId
+			this.asyncQueue.catchAndLogError(promise, 'Error starting launch: ')
+			this.asyncQueue.enqueue(promise)
+		}
+
+		this.storage.setItem('launchId', tempId)
 		this.cacheCommand({ data: launchData, tempId, type: 'startLaunch' })
-		// Send to ReportPortal
-		this.asyncQueue.catchAndLogError(promise, 'Error starting launch: ')
-		this.asyncQueue.enqueue(promise)
 	}
 
 	/**
 	 * Saves cached commands to file if saveToFile option is enabled
 	 */
 	private saveCacheToFile(): void {
-		if (!this.saveToFile) {
+		if (!this.reportOptions.saveToFile || !this.reportOptions.cacheFilePath) {
 			return
 		}
 
@@ -110,18 +125,17 @@ export default class DetoxReporter implements Reporter {
 			}
 
 			// Ensure the directory exists before writing the file
-			const cacheDir = path.dirname(this.cacheFilePath)
+			const cacheDir = path.dirname(this.reportOptions.cacheFilePath)
 			if (!fs.existsSync(cacheDir)) {
 				fs.mkdirSync(cacheDir, { recursive: true })
 			}
 
-			fs.writeFileSync(this.cacheFilePath, JSON.stringify(cacheData, null, 2))
-			console.log(`Cached ${this.cachedCommands.length} ReportPortal commands to ${this.cacheFilePath}`)
+			fs.writeFileSync(this.reportOptions.cacheFilePath, JSON.stringify(cacheData, null, 2))
 
 			// Generate replay script when we finish caching
 			if (this.cachedCommands.length > 0) {
-				const replayScriptPath = this.cacheFilePath.replace('.json', '-replay.js')
-				generateReplayScript(this.cacheFilePath, replayScriptPath)
+				const replayScriptPath = this.reportOptions.cacheFilePath.replace('.json', '-replay.js')
+				generateReplayScript(this.reportOptions.cacheFilePath, replayScriptPath)
 			}
 		} catch (error) {
 			console.error('Failed to save cache to file:', error)
@@ -182,6 +196,36 @@ export default class DetoxReporter implements Reporter {
 			}
 		})
 
+		// Attach artifacts for failed tests and then finish them
+		// At this point, Detox has finished writing all artifact files including videos
+		for (const [fullName, testInfo] of this.failedTests.entries()) {
+			// Check if this test belongs to the current test file
+			if (test.path === testResult.testFilePath) {
+				// Attach artifacts while the test item is still open
+				this.attachArtifacts(fullName, testInfo.tempStepId)
+
+				// Now finish the test item with the stored status/error info
+				const finishData = {
+					status: 'failed',
+					...(testInfo.issue && { issue: testInfo.issue }),
+					...(testInfo.description && { description: testInfo.description }),
+				}
+
+				// Always cache the command for replay capability
+				this.cacheCommand({ data: finishData, tempId: testInfo.tempStepId, type: 'finishTestItem' })
+
+				// Only send to ReportPortal if not in offline mode
+				if (!this.reportOptions.offlineMode) {
+					const { promise } = this.client.finishTestItem(testInfo.tempStepId, finishData)
+					this.asyncQueue.catchAndLogError(promise)
+					this.asyncQueue.enqueue(promise)
+				}
+
+				// Clean up after processing
+				this.failedTests.delete(fullName)
+			}
+		}
+
 		const storageKeys = this.storage.getAllKeys()
 		for (const key of storageKeys) {
 			if (key.startsWith('suiteContext_') && key.includes(testResult.testFilePath)) {
@@ -193,9 +237,7 @@ export default class DetoxReporter implements Reporter {
 				}
 			}
 		}
-	}
-
-	/**
+	} /**
 	 * Called when the entire Jest test run completes
 	 *
 	 * @returns Promise that resolves when all ReportPortal operations are complete
@@ -206,20 +248,25 @@ export default class DetoxReporter implements Reporter {
 		// Always save commands to cache for replay capability
 		this.saveCacheToFile()
 
-		// Always send to ReportPortal and cache for replay capability
 		const launchId = this.storage.getItem<string>('launchId')
 
 		// Always cache the command for replay capability
 		this.cacheCommand({ data: { endTime: Date.now() }, launchId, type: 'finishLaunch' })
 
-		// Send to ReportPortal
+		if (this.reportOptions.offlineMode) {
+			// In offline mode, just save the cache and exit
+			if (this.cachedCommands.length > 0) {
+				this.reportOptions.cacheFilePath?.replace('.json', '-replay.js') ?? './rp-replay.js'
+			}
+			return
+		}
+
+		// Send to ReportPortal in normal mode
 		await this.asyncQueue.process()
 		const { promise } = this.client.finishLaunch(launchId, { endTime: Date.now() })
 
 		this.asyncQueue.catchAndLogError(promise, 'Error finishing launch: ')
 		await promise
-
-		console.log(`Test run completed. Commands cached in memory ${this.saveToFile ? `and saved to ${this.cacheFilePath}` : ''} for replay capability.`)
 	}
 
 	/**
@@ -283,8 +330,19 @@ export default class DetoxReporter implements Reporter {
 			type: TEST_ITEM_TYPES.SUITE,
 		}
 
-		// Always send to ReportPortal and cache for replay capability
-		const { tempId, promise } = this.client.startTestItem(testItemData, launchId, parentId)
+		let tempId: string
+
+		if (this.reportOptions.offlineMode) {
+			// In offline mode, generate our own tempId without calling ReportPortal
+			tempId = `offline-suite-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
+		} else {
+			// In normal mode, call ReportPortal and get real tempId
+			const { tempId: rpTempId, promise } = this.client.startTestItem(testItemData, launchId, parentId)
+			tempId = rpTempId
+			this.asyncQueue.catchAndLogError(promise)
+			this.asyncQueue.enqueue(promise)
+		}
+
 		this.storage.setItem(suiteKey, tempId)
 
 		// Always cache the command for replay capability
@@ -295,10 +353,6 @@ export default class DetoxReporter implements Reporter {
 			type: 'startTestItem',
 			...(parentId && { parentId }),
 		})
-
-		// Send to ReportPortal
-		this.asyncQueue.catchAndLogError(promise)
-		this.asyncQueue.enqueue(promise)
 	}
 
 	/**
@@ -342,10 +396,20 @@ export default class DetoxReporter implements Reporter {
 			type: TEST_ITEM_TYPES.STEP,
 		}
 
+		let tempId: string
 		let tempIdToStore: string[]
 
-		// Always send to ReportPortal and cache for replay capability
-		const { tempId, promise } = this.client.startTestItem(testItemData, launchId, parentId)
+		if (this.reportOptions.offlineMode) {
+			// In offline mode, generate our own tempId without calling ReportPortal
+			tempId = `offline-step-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
+		} else {
+			// In normal mode, call ReportPortal and get real tempId
+			const { tempId: rpTempId, promise } = this.client.startTestItem(testItemData, launchId, parentId)
+			tempId = rpTempId
+			this.asyncQueue.catchAndLogError(promise)
+			this.asyncQueue.enqueue(promise)
+		}
+
 		tempIdToStore = [tempId]
 		if (isRetried && retryIds) tempIdToStore = retryIds.concat(tempIdToStore)
 		this.storage.setItem(stepKey, tempIdToStore)
@@ -358,10 +422,6 @@ export default class DetoxReporter implements Reporter {
 			type: 'startTestItem',
 			...(parentId && { parentId }),
 		})
-
-		// Send to ReportPortal
-		this.asyncQueue.catchAndLogError(promise)
-		this.asyncQueue.enqueue(promise)
 	}
 
 	/**
@@ -417,7 +477,6 @@ export default class DetoxReporter implements Reporter {
 			time: this.client.helpers.now(),
 		}
 
-		// Always send to ReportPortal and cache for replay capability
 		// Always cache the command for replay capability
 		this.cacheCommand({
 			data: logData,
@@ -432,10 +491,12 @@ export default class DetoxReporter implements Reporter {
 			}),
 		})
 
-		// Send to ReportPortal
-		const { promise } = this.client.sendLog(itemTempId, logData, fileObj)
-		this.asyncQueue.catchAndLogError(promise)
-		this.asyncQueue.enqueue(promise)
+		// Only send to ReportPortal if not in offline mode
+		if (!this.reportOptions.offlineMode) {
+			const { promise } = this.client.sendLog(itemTempId, logData, fileObj)
+			this.asyncQueue.catchAndLogError(promise)
+			this.asyncQueue.enqueue(promise)
+		}
 	}
 
 	/**
@@ -447,7 +508,7 @@ export default class DetoxReporter implements Reporter {
 	 * @param params.status - Final test status (passed, failed, skipped, etc.)
 	 * @param params.error - Error message if the test failed (optional)
 	 * @description Finalizes the test step in ReportPortal with status, description, and issue information.
-	 * Automatically attaches artifacts for failed tests and logs error messages.
+	 * For failed tests, defers finishing until artifacts can be attached in onTestResult.
 	 */
 	private finishTestStep({ error, fullName, tempStepId, status }: { tempStepId: string; fullName?: string; status: string; error?: string }): void {
 		const issue = this.reportOptions.skippedIssue === false ? { issueType: 'NOT_ISSUE' } : undefined
@@ -463,22 +524,37 @@ export default class DetoxReporter implements Reporter {
 			})
 		}
 
-		fullName && this.attachArtifacts(fullName, tempStepId)
+		// Store failed tests for deferred completion
+		// We need to attach artifacts BEFORE finishing the test item
+		// Artifacts will be attached in onTestResult when Detox has finished writing files
+		if (fullName && status === 'failed') {
+			this.failedTests.set(fullName, {
+				fullName,
+				tempStepId,
+				...(error && { error }),
+				...(issue && { issue }),
+				...(description && { description }),
+			})
+			// Don't finish the test item yet - it will be finished in onTestResult after artifacts are attached
+			return
+		}
 
+		// For passed/skipped tests, finish immediately
 		const finishData = {
 			status,
 			...(issue && { issue }),
 			...(description && { description }),
 		}
 
-		// Always send to ReportPortal and cache for replay capability
 		// Always cache the command for replay capability
 		this.cacheCommand({ data: finishData, tempId: tempStepId, type: 'finishTestItem' })
 
-		// Send to ReportPortal
-		const { promise } = this.client.finishTestItem(tempStepId, finishData)
-		this.asyncQueue.catchAndLogError(promise)
-		this.asyncQueue.enqueue(promise)
+		// Only send to ReportPortal if not in offline mode
+		if (!this.reportOptions.offlineMode) {
+			const { promise } = this.client.finishTestItem(tempStepId, finishData)
+			this.asyncQueue.catchAndLogError(promise)
+			this.asyncQueue.enqueue(promise)
+		}
 	}
 
 	/**
@@ -488,6 +564,7 @@ export default class DetoxReporter implements Reporter {
 	 * @param tempStepId - Temporary ID of the test step to attach artifacts to
 	 * @description Searches for and attaches Detox-generated artifacts (PNG screenshots and MP4 videos)
 	 * to failed test steps. Uses the configured artifacts path and test naming conventions.
+	 * Called after suite finishes to ensure Detox has completed writing all files.
 	 */
 	private attachArtifacts(fullName: string, tempStepId: string): void {
 		if (this.reportOptions.artifactsPath) {
@@ -503,8 +580,9 @@ export default class DetoxReporter implements Reporter {
 						const imagePath = path.join(artifactFolder, pngFile)
 						if (fs.existsSync(imagePath)) {
 							const fileNameWithoutExt = path.basename(pngFile, path.extname(pngFile))
+							const imageBuffer = fs.readFileSync(imagePath)
 							const image = {
-								content: fs.readFileSync(imagePath).toString('base64'),
+								content: imageBuffer.toString('base64'),
 								name: pngFile,
 								type: 'image/png',
 							}
@@ -522,22 +600,69 @@ export default class DetoxReporter implements Reporter {
 					console.warn(`Failed to read PNG files from artifact folder: ${artifactFolder}`, error)
 				}
 
-				// Check for video
-				const videoPath = path.join(artifactFolder, 'test.mp4')
-				if (fs.existsSync(videoPath)) {
-					const video = {
-						content: fs.readFileSync(videoPath).toString('base64'),
-						name: 'test.mp4',
-						type: 'video/mp4',
+				// Check for video files (*.mp4)
+				try {
+					const files = fs.readdirSync(artifactFolder)
+					const mp4Files = files.filter(file => path.extname(file).toLowerCase() === '.mp4')
+
+					for (const mp4File of mp4Files) {
+						const videoPath = path.join(artifactFolder, mp4File)
+						if (fs.existsSync(videoPath)) {
+							const fileNameWithoutExt = path.basename(mp4File, path.extname(mp4File))
+							const videoBuffer = fs.readFileSync(videoPath)
+							const video = {
+								content: videoBuffer.toString('base64'),
+								name: mp4File,
+								type: 'video/mp4',
+							}
+							this.sendLog({
+								fileObj: video,
+								itemTempId: tempStepId,
+								saveLogRQ: {
+									level: LOG_LEVEL.ERROR,
+									message: fileNameWithoutExt,
+								},
+							})
+						} else {
+							console.warn(`[DetoxReporter] Video file does not exist: ${videoPath}`)
+						}
 					}
-					this.sendLog({
-						fileObj: video,
-						itemTempId: tempStepId,
-						saveLogRQ: {
-							level: LOG_LEVEL.ERROR,
-							message: 'Video:',
-						},
-					})
+				} catch (error) {
+					console.warn(`Failed to read MP4 files from artifact folder: ${artifactFolder}`, error)
+				}
+
+				// Also check parent (session) folder for videos
+				// Videos are often stored at session level, not test level
+				try {
+					const parentFolder = path.dirname(artifactFolder)
+
+					if (fs.existsSync(parentFolder)) {
+						const parentFiles = fs.readdirSync(parentFolder)
+						const parentMp4Files = parentFiles.filter(file => path.extname(file).toLowerCase() === '.mp4')
+
+						for (const mp4File of parentMp4Files) {
+							const videoPath = path.join(parentFolder, mp4File)
+							if (fs.existsSync(videoPath)) {
+								const fileNameWithoutExt = path.basename(mp4File, path.extname(mp4File))
+								const videoBuffer = fs.readFileSync(videoPath)
+								const video = {
+									content: videoBuffer.toString('base64'),
+									name: mp4File,
+									type: 'video/mp4',
+								}
+								this.sendLog({
+									fileObj: video,
+									itemTempId: tempStepId,
+									saveLogRQ: {
+										level: LOG_LEVEL.ERROR,
+										message: fileNameWithoutExt,
+									},
+								})
+							}
+						}
+					}
+				} catch (error) {
+					console.warn(`Failed to read MP4 files from parent folder`, error)
 				}
 			}
 		}
@@ -559,10 +684,14 @@ export default class DetoxReporter implements Reporter {
 		const finishData = { endTime: Date.now() }
 
 		this.cacheCommand({ data: finishData, tempId: tempTestId, type: 'finishTestItem' })
-		// Send to ReportPortal
-		const { promise } = this.client.finishTestItem(tempTestId, finishData)
-		this.asyncQueue.catchAndLogError(promise)
-		this.asyncQueue.enqueue(promise)
+
+		// Only send to ReportPortal if not in offline mode
+		if (!this.reportOptions.offlineMode) {
+			const { promise } = this.client.finishTestItem(tempTestId, finishData)
+			this.asyncQueue.catchAndLogError(promise)
+			this.asyncQueue.enqueue(promise)
+		}
+
 		this.storage.removeItem(key)
 	}
 
@@ -588,37 +717,53 @@ export default class DetoxReporter implements Reporter {
 	 * @param root - Root artifacts directory path to search in
 	 * @param testFullName - Full test name from Jest (test.fullName)
 	 * @returns Full path to the artifact folder if found, null otherwise
-	 * @description Uses Detox's ArtifactPathBuilder logic to find the test's artifact folder.
-	 * Detox creates folders directly in the artifacts directory with pattern: "✗ {sanitized test fullName}"
+	 * @description Searches for test artifacts both directly in root and in session subdirectories.
+	 * Detox creates session folders with pattern: {config}.{timestamp} (e.g., XXX_XXXX.2025-10-20 15-55-08Z)
+	 * Test folders inside have pattern: "✗ {sanitized test fullName}"
 	 */
 	private findArtifactFolder(root: string, testFullName: string): string | null {
 		try {
-			// Try Detox's expected pattern first
 			const prefix = '✗ '
 			const sanitizedTestName = this.sanitizeFilename(testFullName)
 			const expectedFolderName = `${prefix}${sanitizedTestName}`
 
-			let expectedPath = path.join(root, expectedFolderName)
-			if (fs.existsSync(expectedPath)) {
-				return expectedPath
-			}
-
-			// Try with the XXX_ transformation we observe in actual folders
+			// Try with the XXX_ transformation (e.g., "XXX:" → "XXX_")
 			const transformedTestName = testFullName.replace(/^(\w+)\s/, '$1_ ')
 			const transformedSanitized = this.sanitizeFilename(transformedTestName)
 			const transformedFolderName = `${prefix}${transformedSanitized}`
 
-			expectedPath = path.join(root, transformedFolderName)
-			if (fs.existsSync(expectedPath)) {
-				return expectedPath
+			// First, try directly in the artifacts root (backward compatibility)
+			let directPath = path.join(root, expectedFolderName)
+			if (fs.existsSync(directPath)) {
+				return directPath
 			}
 
-			// Fallback: look directly in the artifacts directory for any folder starting with ✗
-			// No recursive search needed since Detox creates test folders directly in the artifacts root
+			directPath = path.join(root, transformedFolderName)
+			if (fs.existsSync(directPath)) {
+				return directPath
+			}
+
+			// Search in session subdirectories (e.g., pma_android.2025-10-20 15-55-08Z)
 			const entries = fs.readdirSync(root, { withFileTypes: true })
 			for (const entry of entries) {
-				if (entry.isDirectory() && entry.name.startsWith('✗')) {
-					return path.join(root, entry.name)
+				// Skip files and folders starting with ✗ (those are direct test folders, already checked)
+				if (!entry.isDirectory() || entry.name.startsWith('✗')) {
+					continue
+				}
+
+				// This is potentially a session folder, search inside it
+				const sessionPath = path.join(root, entry.name)
+
+				// Try expected folder name
+				let sessionArtifactPath = path.join(sessionPath, expectedFolderName)
+				if (fs.existsSync(sessionArtifactPath)) {
+					return sessionArtifactPath
+				}
+
+				// Try transformed folder name
+				sessionArtifactPath = path.join(sessionPath, transformedFolderName)
+				if (fs.existsSync(sessionArtifactPath)) {
+					return sessionArtifactPath
 				}
 			}
 
@@ -665,12 +810,15 @@ export default class DetoxReporter implements Reporter {
 
 		this.cachedCommands.push(command)
 
-		// Only save to file periodically or for critical commands to avoid excessive I/O
-		if (
-			this.saveToFile &&
-			(params.type === 'startLaunch' || params.type === 'finishLaunch' || this.cachedCommands.length % 10 === 0) // Save every 10 commands
-		) {
-			this.saveCacheToFile()
+		// In offline mode, save more frequently to ensure we don't lose data
+		// In normal mode, only save to file periodically or for critical commands to avoid excessive I/O
+		if (this.reportOptions.saveToFile) {
+			const shouldSave =
+				this.reportOptions.offlineMode || params.type === 'startLaunch' || params.type === 'finishLaunch' || this.cachedCommands.length % 10 === 0 // Save every 10 commands
+
+			if (shouldSave) {
+				this.saveCacheToFile()
+			}
 		}
 	}
 }

@@ -7,6 +7,7 @@ interface ExtendedClientConfig extends ClientConfig {
     extendTestDescriptionWithLastError: boolean;
     saveToFile?: boolean;
     cacheFilePath?: string;
+    offlineMode?: boolean;
 }
 declare class DetoxReporter implements Reporter {
     private readonly reportOptions;
@@ -14,8 +15,7 @@ declare class DetoxReporter implements Reporter {
     private asyncQueue;
     private storage;
     private cachedCommands;
-    private cacheFilePath;
-    private saveToFile;
+    private failedTests;
     constructor(_globalConfig: Config.GlobalConfig, options: Partial<ExtendedClientConfig>);
     /**
      * Called when Jest test run starts
@@ -55,8 +55,7 @@ declare class DetoxReporter implements Reporter {
      * @description Handles pending/skipped tests and cleans up suite contexts for the completed file.
      * Ensures all test suites are properly finished in ReportPortal.
      */
-    onTestResult(test: Test, testResult: TestResult): void;
-    /**
+    onTestResult(test: Test, testResult: TestResult): void; /**
      * Called when the entire Jest test run completes
      *
      * @returns Promise that resolves when all ReportPortal operations are complete
@@ -127,7 +126,7 @@ declare class DetoxReporter implements Reporter {
      * @param params.status - Final test status (passed, failed, skipped, etc.)
      * @param params.error - Error message if the test failed (optional)
      * @description Finalizes the test step in ReportPortal with status, description, and issue information.
-     * Automatically attaches artifacts for failed tests and logs error messages.
+     * For failed tests, defers finishing until artifacts can be attached in onTestResult.
      */
     private finishTestStep;
     /**
@@ -137,6 +136,7 @@ declare class DetoxReporter implements Reporter {
      * @param tempStepId - Temporary ID of the test step to attach artifacts to
      * @description Searches for and attaches Detox-generated artifacts (PNG screenshots and MP4 videos)
      * to failed test steps. Uses the configured artifacts path and test naming conventions.
+     * Called after suite finishes to ensure Detox has completed writing all files.
      */
     private attachArtifacts;
     /**
@@ -165,8 +165,9 @@ declare class DetoxReporter implements Reporter {
      * @param root - Root artifacts directory path to search in
      * @param testFullName - Full test name from Jest (test.fullName)
      * @returns Full path to the artifact folder if found, null otherwise
-     * @description Uses Detox's ArtifactPathBuilder logic to find the test's artifact folder.
-     * Detox creates folders directly in the artifacts directory with pattern: "✗ {sanitized test fullName}"
+     * @description Searches for test artifacts both directly in root and in session subdirectories.
+     * Detox creates session folders with pattern: {config}.{timestamp} (e.g., XXX_XXXX.2025-10-20 15-55-08Z)
+     * Test folders inside have pattern: "✗ {sanitized test fullName}"
      */
     private findArtifactFolder;
     /**

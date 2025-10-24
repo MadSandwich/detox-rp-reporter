@@ -10,6 +10,7 @@ A Jest reporter that integrates Detox mobile testing framework with ReportPortal
 
 * **ReportPortal Integration**: Uploads test results directly to ReportPortal
 * **Artifact Support**: Automatically attaches screenshots and videos from failed tests
+* **Offline Mode**: Run tests without real-time reporting - cache and upload later
 * **Always-Cache Mode**: Commands cached in memory for reliable reporting
 * **TypeScript Support**: Built with TypeScript for better developer experience
 
@@ -93,27 +94,41 @@ Artifacts are searched in the Detox artifacts directory structure:
 | `attributes` | array | `[]` | Launch attributes |
 | `extendTestDescriptionWithLastError` | boolean | `true` | Include error details in test description |
 | `skippedIssue` | boolean | `true` | Mark skipped tests as issues |
-| `saveToFile` | boolean | `false` | Save cached commands to file for debugging |
+| `offlineMode` | boolean | `false` | Enable offline mode - cache only, no real-time reporting |
+| `saveToFile` | boolean | `true` | Save cached commands to file |
+| `cacheFilePath` | string | `./rp-cache.json` | Path to cache file |
 | `launchId` | string | - | Existing launch ID to append results |
 | `rerun` | boolean | `false` | Rerun mode |
 | `rerunOf` | string | - | UUID of launch to rerun |
 
 ### Cache and File Save Mode
 
-The reporter operates in always-cache mode, storing all commands in memory for reliable reporting. For debugging purposes, you can enable file persistence:
+The reporter operates in always-cache mode, storing all commands in memory for reliable reporting. By default, commands are also saved to a file for debugging and offline replay capabilities.
+
+#### Offline Mode
+
+When you need to run tests without real-time ReportPortal connectivity:
 
 ```javascript
 {
   "reporters": [
     ["detox-rp-reporter", {
-      "saveToFile": true,
+      "offlineMode": true,  // Disable real-time reporting
+      "saveToFile": true,   // Save commands to cache file
+      "cacheFilePath": "./rp-cache.json",
       // ... other options
     }]
   ]
 }
 ```
 
-For more details about caching and offline capabilities, see [OFFLINE_MODE.md](./OFFLINE_MODE.md).
+After running tests in offline mode, upload results with the generated replay script:
+
+```bash
+node ./rp-replay.js
+```
+
+For comprehensive offline mode documentation, see [OFFLINE_MODE_USAGE.md](./OFFLINE_MODE_USAGE.md).
 
 ## Requirements
 
