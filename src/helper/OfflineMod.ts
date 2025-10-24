@@ -23,8 +23,6 @@ export default function generateReplayScript(cacheFilePath: string, outputScript
 	try {
 		fs.writeFileSync(outputScriptPath, replayScript)
 		fs.chmodSync(outputScriptPath, '755') // Make executable
-		console.log(`Replay script generated: ${outputScriptPath} (${isESModule ? 'ES Module' : 'CommonJS'})`)
-		console.log(`Usage: node ${outputScriptPath} [cache-file-path]`)
 	} catch (error) {
 		console.error('Failed to generate replay script:', error)
 	}
