@@ -74,83 +74,129 @@ function getReplayFunction(): string {
     try {
         console.log('Loading cached commands from:', cacheFilePath);
         const cacheData = JSON.parse(fs.readFileSync(cacheFilePath, 'utf8'));
-        
+
         const client = new RPClient(cacheData.reportOptions);
         const commands = cacheData.commands;
         const tempIdMap = new Map(); // Map cached tempIds to real ones
-        
+
         console.log(\`Replaying \${commands.length} commands...\`);
-        
-        for (const command of commands) {
-            console.log(\`Executing: \${command.type} at \${new Date(command.timestamp).toISOString()}\`);
-            
+
+        let successCount = 0;
+        let errorCount = 0;
+
+        for (let i = 0; i < commands.length; i++) {
+            const command = commands[i];
+            console.log(\`[\${i + 1}/\${commands.length}] Executing: \${command.type} at \${new Date(command.timestamp).toISOString()}\`);
+
             try {
+                // Add timeout wrapper for all promises
+                const timeoutPromise = (promise, timeout = 30000) => {
+                    return Promise.race([
+                        promise,
+                        new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error(\`Timeout after \${timeout}ms\`)), timeout)
+                        )
+                    ]);
+                };
+
                 switch (command.type) {
                     case 'startLaunch': {
                         const { tempId, promise } = client.startLaunch(command.data);
-                        await promise;
+                        await timeoutPromise(promise);
                         if (command.tempId) {
                             tempIdMap.set(command.tempId, tempId);
                         }
                         break;
                     }
-                    
+
                     case 'startTestItem': {
                         const launchId = command.launchId ? tempIdMap.get(command.launchId) : undefined;
                         const parentId = command.parentId ? tempIdMap.get(command.parentId) : undefined;
-                        
+
+                        if (command.launchId && !launchId) {
+                            throw new Error(\`Launch ID not found in map: \${command.launchId}\`);
+                        }
+                        if (command.parentId && !parentId) {
+                            console.warn(\`Parent ID not found in map: \${command.parentId}, continuing without parent\`);
+                        }
+
                         const { tempId, promise } = client.startTestItem(command.data, launchId, parentId);
-                        await promise;
+                        await timeoutPromise(promise);
                         if (command.tempId) {
                             tempIdMap.set(command.tempId, tempId);
                         }
                         break;
                     }
-                    
+
                     case 'finishTestItem': {
                         const itemId = command.tempId ? tempIdMap.get(command.tempId) : undefined;
-                        if (itemId) {
-                            const { promise } = client.finishTestItem(itemId, command.data);
-                            await promise;
+                        if (!itemId) {
+                            console.warn(\`Test item ID not found in map: \${command.tempId}, skipping finish\`);
+                            break;
                         }
+                        const { promise } = client.finishTestItem(itemId, command.data);
+                        await timeoutPromise(promise);
                         break;
                     }
-                    
+
                     case 'sendLog': {
                         const itemId = command.tempId ? tempIdMap.get(command.tempId) : undefined;
-                        if (itemId) {
-                            const { promise } = client.sendLog(itemId, command.data, command.fileData);
-                            await promise;
+                        if (!itemId) {
+                            console.warn(\`Log item ID not found in map: \${command.tempId}, skipping log\`);
+                            break;
                         }
+                        const { promise } = client.sendLog(itemId, command.data, command.fileData);
+                        await timeoutPromise(promise);
                         break;
                     }
-                    
+
                     case 'finishLaunch': {
                         const launchId = command.launchId ? tempIdMap.get(command.launchId) : undefined;
-                        if (launchId) {
-                            const { promise } = client.finishLaunch(launchId, command.data);
-                            await promise;
+                        if (!launchId) {
+                            console.warn(\`Launch ID not found in map: \${command.launchId}, skipping finish launch\`);
+                            break;
                         }
+                        const { promise } = client.finishLaunch(launchId, command.data);
+                        await timeoutPromise(promise);
                         break;
                     }
                 }
-                
-                // Small delay to avoid overwhelming the server
-                await new Promise(resolve => setTimeout(resolve, 100));
-                
+
+                successCount++;
+
+                // Adaptive delay: increase after every 30 items to avoid rate limiting
+                const delay = i > 0 && (i + 1) % 30 === 0 ? 2000 : 200;
+                if (delay === 2000) {
+                    console.log(\`Processed 30 items, pausing for \${delay}ms to avoid rate limiting...\`);
+                }
+                await new Promise(resolve => setTimeout(resolve, delay));
+
             } catch (error) {
-                console.error(\`Error executing \${command.type}:\`, error);
-                // Continue with next command
+                errorCount++;
+                console.error(\`[ERROR \${errorCount}] Failed executing \${command.type}:\`, error.message);
+
+                // If critical command fails (startLaunch), abort
+                if (command.type === 'startLaunch') {
+                    console.error('Critical error: Failed to start launch. Aborting replay.');
+                    throw error;
+                }
+
+                // For other errors, continue but warn
+                if (errorCount > 10) {
+                    console.error(\`Too many errors (\${errorCount}). Consider checking ReportPortal connection.\`);
+                }
             }
         }
-        
+
+        console.log(\`\\nReplay summary: \${successCount} succeeded, \${errorCount} failed out of \${commands.length} commands.\`);
+
         console.log('Replay completed successfully!');
-        
+
         // Optionally backup the cache file
         const backupPath = cacheFilePath + '.completed.' + Date.now();
         fs.renameSync(cacheFilePath, backupPath);
         console.log(\`Cache file backed up to: \${backupPath}\`);
-        
+
     } catch (error) {
         console.error('Failed to replay commands:', error);
         process.exit(1);
