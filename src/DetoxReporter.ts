@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { gzipSync } from 'node:zlib'
 import type { Reporter, Test, TestCaseResult, TestResult } from '@jest/reporters'
 import type { Circus, Config } from '@jest/types'
 import type { ClientConfig, FileObj, RPClientInterface, SaveLogRQ } from '@reportportal/client-javascript'
@@ -21,12 +22,32 @@ export const TEST_ITEM_TYPES = {
 	SUITE: 'SUITE',
 } as const
 
+/**
+ * Compresses base64-encoded content using gzip
+ * @param base64Content - Base64 string to compress
+ * @returns Compressed base64 string
+ */
+function compressArtifact(base64Content: string): string {
+	try {
+		const buffer = Buffer.from(base64Content, 'base64')
+		const compressed = gzipSync(buffer)
+		return compressed.toString('base64')
+	} catch (error) {
+		console.warn('Failed to compress artifact, using original:', error)
+		return base64Content
+	}
+}
+
 interface ExtendedClientConfig extends ClientConfig {
 	artifactsPath?: string | undefined
 	extendTestDescriptionWithLastError: boolean
 	saveToFile?: boolean
 	cacheFilePath?: string
 	offlineMode?: boolean
+	cacheArtifacts?: boolean
+	compressArtifacts?: boolean
+	maxCacheSize?: number // Max cache size in bytes (default: 50MB)
+	flushInterval?: number // Flush cache every N commands (default: 50)
 }
 
 export default class DetoxReporter implements Reporter {
@@ -37,15 +58,21 @@ export default class DetoxReporter implements Reporter {
 	private storage: Storage
 	private cachedCommands: CachedCommand[]
 	private failedTests: Map<string, { fullName: string; tempStepId: string; error?: string; issue?: { issueType: string }; description?: string }>
+	private currentCacheSize: number
+	private commandCounter: number
 
 	constructor(_globalConfig: Config.GlobalConfig, options: Partial<ExtendedClientConfig>) {
 		this.reportOptions = {
 			apiKey: process.env.RP_API_KEY ?? options.apiKey ?? '',
 			artifactsPath: process.env.DETOX_ARTIFACTS_PATH ?? '.artifacts',
+			cacheArtifacts: options.cacheArtifacts ?? true,
 			cacheFilePath: options.cacheFilePath ?? './rp-cache.json',
+			compressArtifacts: options.compressArtifacts ?? true,
 			endpoint: process.env.RP_ENDPOINT ?? options.endpoint ?? '',
 			extendTestDescriptionWithLastError: options.extendTestDescriptionWithLastError ?? true,
+			flushInterval: options.flushInterval ?? 50, // Flush every 50 commands
 			launch: process.env.RP_LAUNCH ?? options.launch ?? '',
+			maxCacheSize: options.maxCacheSize ?? 50 * 1024 * 1024, // 50MB default
 			offlineMode: options.offlineMode ?? false,
 			project: process.env.RP_PROJECT_NAME ?? options.project ?? 'Detox Agent Reporter',
 			saveToFile: options.saveToFile ?? true,
@@ -72,7 +99,10 @@ export default class DetoxReporter implements Reporter {
 
 		// Initialize caching properties
 		this.cachedCommands = []
-		this.failedTests = new Map() // Log mode on startup
+		this.failedTests = new Map()
+		this.currentCacheSize = 0
+		this.commandCounter = 0
+		// Log mode on startup
 		if (this.reportOptions.offlineMode) {
 		}
 	}
@@ -118,14 +148,62 @@ export default class DetoxReporter implements Reporter {
 		}
 
 		try {
+			const cacheDir = path.dirname(this.reportOptions.cacheFilePath)
+
+			// Create artifacts directory if caching artifacts
+			const artifactsDir = path.join(cacheDir, 'rp-cache-artifacts')
+			if (this.reportOptions.cacheArtifacts && !fs.existsSync(artifactsDir)) {
+				fs.mkdirSync(artifactsDir, { recursive: true })
+			}
+
+			// Process commands: extract artifacts to separate files
+			const processedCommands = this.cachedCommands.map((cmd, idx) => {
+				if (cmd.fileData?.content) {
+					// Skip artifact caching if disabled
+					if (!this.reportOptions.cacheArtifacts) {
+						return {
+							...cmd,
+							fileData: {
+								name: cmd.fileData.name,
+								type: cmd.fileData.type,
+								// Content excluded - metadata only
+							},
+						}
+					}
+
+					// Save artifact to separate file
+					const artifactFileName = `artifact-${idx}-${cmd.timestamp}.dat`
+					const artifactPath = path.join(artifactsDir, artifactFileName)
+
+					let contentToSave = cmd.fileData.content
+
+					// Compress if enabled
+					if (this.reportOptions.compressArtifacts) {
+						contentToSave = compressArtifact(contentToSave)
+					}
+
+					fs.writeFileSync(artifactPath, contentToSave, 'utf8')
+
+					return {
+						...cmd,
+						fileData: {
+							compressed: this.reportOptions.compressArtifacts,
+							contentPath: path.relative(cacheDir, artifactPath),
+							name: cmd.fileData.name,
+							type: cmd.fileData.type,
+						},
+					}
+				}
+				return cmd
+			})
+
 			const cacheData = {
-				commands: this.cachedCommands,
+				commands: processedCommands,
 				reportOptions: this.reportOptions,
 				timestamp: Date.now(),
 			}
 
 			// Ensure the directory exists before writing the file
-			const cacheDir = path.dirname(this.reportOptions.cacheFilePath)
 			if (!fs.existsSync(cacheDir)) {
 				fs.mkdirSync(cacheDir, { recursive: true })
 			}
@@ -798,6 +876,27 @@ export default class DetoxReporter implements Reporter {
 		parentId?: string
 		fileData?: CachedCommand['fileData']
 	}): void {
+		// Memory optimization: check cache size before adding
+		if (params.fileData?.content && this.reportOptions.maxCacheSize) {
+			const estimatedSize = params.fileData.content.length
+
+			if (this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize) {
+				console.warn(
+					`Cache size limit approaching (${Math.round(this.currentCacheSize / (1024 * 1024))}MB / ${Math.round(this.reportOptions.maxCacheSize / (1024 * 1024))}MB). Flushing cache...`
+				)
+				this.saveCacheToFile()
+
+				// After flush, if we're still over limit, skip file data
+				if (this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize) {
+					console.warn('Cache size still too large. Skipping artifact caching for this item.')
+					params.fileData = undefined
+				}
+			}
+
+			// Update cache size tracker
+			this.currentCacheSize += estimatedSize
+		}
+
 		const command: CachedCommand = {
 			data: params.data,
 			timestamp: Date.now(),
@@ -809,12 +908,18 @@ export default class DetoxReporter implements Reporter {
 		}
 
 		this.cachedCommands.push(command)
+		this.commandCounter++
 
 		// In offline mode, save more frequently to ensure we don't lose data
 		// In normal mode, only save to file periodically or for critical commands to avoid excessive I/O
 		if (this.reportOptions.saveToFile) {
+			const flushInterval = this.reportOptions.flushInterval ?? 50
 			const shouldSave =
-				this.reportOptions.offlineMode || params.type === 'startLaunch' || params.type === 'finishLaunch' || this.cachedCommands.length % 10 === 0 // Save every 10 commands
+				this.reportOptions.offlineMode ||
+				params.type === 'startLaunch' ||
+				params.type === 'finishLaunch' ||
+				this.commandCounter % flushInterval === 0 || // Flush based on configured interval
+				this.currentCacheSize > (this.reportOptions.maxCacheSize ?? 50 * 1024 * 1024) * 0.8 // Flush at 80% capacity
 
 			if (shouldSave) {
 				this.saveCacheToFile()

@@ -8,9 +8,11 @@ export interface CachedCommand {
 	launchId?: string
 	parentId?: string
 	fileData?: {
-		content: string
+		content?: string // Optional - may be stored externally
 		name: string
 		type: string
+		contentPath?: string // Path to external artifact file
+		compressed?: boolean // Whether content is gzip-compressed
 	}
 }
 
@@ -44,8 +46,8 @@ function detectESModule(): boolean {
 
 function generateScript(cacheFilePath: string, isESModule: boolean): string {
 	const imports = isESModule
-		? `import fs from 'fs';\nimport RPClient from '@reportportal/client-javascript';`
-		: `const fs = require('fs');\nconst RPClient = require('@reportportal/client-javascript').default;`
+		? `import fs from 'fs';\nimport path from 'path';\nimport { gunzipSync } from 'zlib';\nimport RPClient from '@reportportal/client-javascript';`
+		: `const fs = require('fs');\nconst path = require('path');\nconst { gunzipSync } = require('zlib');\nconst RPClient = require('@reportportal/client-javascript').default;`
 
 	const moduleType = isESModule ? 'ES Module' : 'CommonJS'
 
@@ -78,6 +80,7 @@ function getReplayFunction(): string {
         const client = new RPClient(cacheData.reportOptions);
         const commands = cacheData.commands;
         const tempIdMap = new Map(); // Map cached tempIds to real ones
+        const cacheDir = path.dirname(cacheFilePath);
 
         console.log(\`Replaying \${commands.length} commands...\`);
 
@@ -89,6 +92,32 @@ function getReplayFunction(): string {
             console.log(\`[\${i + 1}/\${commands.length}] Executing: \${command.type} at \${new Date(command.timestamp).toISOString()}\`);
 
             try {
+                // Load external artifact if needed
+                if (command.fileData?.contentPath) {
+                    const artifactPath = path.join(cacheDir, command.fileData.contentPath);
+                    if (fs.existsSync(artifactPath)) {
+                        let content = fs.readFileSync(artifactPath, 'utf8');
+                        
+                        // Decompress if compressed
+                        if (command.fileData.compressed) {
+                            try {
+                                const buffer = Buffer.from(content, 'base64');
+                                const decompressed = gunzipSync(buffer);
+                                content = decompressed.toString('base64');
+                            } catch (decompErr) {
+                                console.warn('Failed to decompress artifact, using as-is:', decompErr.message);
+                            }
+                        }
+                        
+                        command.fileData.content = content;
+                        delete command.fileData.contentPath;
+                        delete command.fileData.compressed;
+                    } else {
+                        console.warn(\`Artifact file not found: \${artifactPath}, skipping attachment\`);
+                        delete command.fileData;
+                    }
+                }
+
                 // Add timeout wrapper for all promises
                 const timeoutPromise = (promise, timeout = 30000) => {
                     return Promise.race([

@@ -8,6 +8,10 @@ interface ExtendedClientConfig extends ClientConfig {
     saveToFile?: boolean;
     cacheFilePath?: string;
     offlineMode?: boolean;
+    cacheArtifacts?: boolean;
+    compressArtifacts?: boolean;
+    maxCacheSize?: number;
+    flushInterval?: number;
 }
 declare class DetoxReporter implements Reporter {
     private readonly reportOptions;
@@ -16,6 +20,8 @@ declare class DetoxReporter implements Reporter {
     private storage;
     private cachedCommands;
     private failedTests;
+    private currentCacheSize;
+    private commandCounter;
     constructor(_globalConfig: Config.GlobalConfig, options: Partial<ExtendedClientConfig>);
     /**
      * Called when Jest test run starts

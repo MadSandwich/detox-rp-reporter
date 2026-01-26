@@ -1,6 +1,7 @@
 // src/DetoxReporter.ts
 import fs2 from "fs";
 import path from "path";
+import { gzipSync } from "zlib";
 import RPClient from "@reportportal/client-javascript";
 
 // src/AsyncQueue.ts
@@ -48,7 +49,11 @@ function detectESModule() {
 }
 function generateScript(cacheFilePath, isESModule) {
   const imports = isESModule ? `import fs from 'fs';
+import path from 'path';
+import { gunzipSync } from 'zlib';
 import RPClient from '@reportportal/client-javascript';` : `const fs = require('fs');
+const path = require('path');
+const { gunzipSync } = require('zlib');
 const RPClient = require('@reportportal/client-javascript').default;`;
   const moduleType = isESModule ? "ES Module" : "CommonJS";
   return `#!/usr/bin/env node
@@ -79,6 +84,7 @@ function getReplayFunction() {
         const client = new RPClient(cacheData.reportOptions);
         const commands = cacheData.commands;
         const tempIdMap = new Map(); // Map cached tempIds to real ones
+        const cacheDir = path.dirname(cacheFilePath);
 
         console.log(\`Replaying \${commands.length} commands...\`);
 
@@ -90,6 +96,32 @@ function getReplayFunction() {
             console.log(\`[\${i + 1}/\${commands.length}] Executing: \${command.type} at \${new Date(command.timestamp).toISOString()}\`);
 
             try {
+                // Load external artifact if needed
+                if (command.fileData?.contentPath) {
+                    const artifactPath = path.join(cacheDir, command.fileData.contentPath);
+                    if (fs.existsSync(artifactPath)) {
+                        let content = fs.readFileSync(artifactPath, 'utf8');
+                        
+                        // Decompress if compressed
+                        if (command.fileData.compressed) {
+                            try {
+                                const buffer = Buffer.from(content, 'base64');
+                                const decompressed = gunzipSync(buffer);
+                                content = decompressed.toString('base64');
+                            } catch (decompErr) {
+                                console.warn('Failed to decompress artifact, using as-is:', decompErr.message);
+                            }
+                        }
+                        
+                        command.fileData.content = content;
+                        delete command.fileData.contentPath;
+                        delete command.fileData.compressed;
+                    } else {
+                        console.warn(\`Artifact file not found: \${artifactPath}, skipping attachment\`);
+                        delete command.fileData;
+                    }
+                }
+
                 // Add timeout wrapper for all promises
                 const timeoutPromise = (promise, timeout = 30000) => {
                     return Promise.race([
@@ -240,6 +272,16 @@ var TEST_ITEM_TYPES = {
   STEP: "STEP",
   SUITE: "SUITE"
 };
+function compressArtifact(base64Content) {
+  try {
+    const buffer = Buffer.from(base64Content, "base64");
+    const compressed = gzipSync(buffer);
+    return compressed.toString("base64");
+  } catch (error) {
+    console.warn("Failed to compress artifact, using original:", error);
+    return base64Content;
+  }
+}
 var DetoxReporter = class {
   reportOptions;
   client;
@@ -247,14 +289,22 @@ var DetoxReporter = class {
   storage;
   cachedCommands;
   failedTests;
+  currentCacheSize;
+  commandCounter;
   constructor(_globalConfig, options) {
     this.reportOptions = {
       apiKey: process.env.RP_API_KEY ?? options.apiKey ?? "",
       artifactsPath: process.env.DETOX_ARTIFACTS_PATH ?? ".artifacts",
+      cacheArtifacts: options.cacheArtifacts ?? true,
       cacheFilePath: options.cacheFilePath ?? "./rp-cache.json",
+      compressArtifacts: options.compressArtifacts ?? true,
       endpoint: process.env.RP_ENDPOINT ?? options.endpoint ?? "",
       extendTestDescriptionWithLastError: options.extendTestDescriptionWithLastError ?? true,
+      flushInterval: options.flushInterval ?? 50,
+      // Flush every 50 commands
       launch: process.env.RP_LAUNCH ?? options.launch ?? "",
+      maxCacheSize: options.maxCacheSize ?? 50 * 1024 * 1024,
+      // 50MB default
       offlineMode: options.offlineMode ?? false,
       project: process.env.RP_PROJECT_NAME ?? options.project ?? "Detox Agent Reporter",
       saveToFile: options.saveToFile ?? true,
@@ -279,6 +329,8 @@ var DetoxReporter = class {
     this.storage = new Storage();
     this.cachedCommands = [];
     this.failedTests = /* @__PURE__ */ new Map();
+    this.currentCacheSize = 0;
+    this.commandCounter = 0;
     if (this.reportOptions.offlineMode) {
     }
   }
@@ -316,12 +368,47 @@ var DetoxReporter = class {
       return;
     }
     try {
+      const cacheDir = path.dirname(this.reportOptions.cacheFilePath);
+      const artifactsDir = path.join(cacheDir, "rp-cache-artifacts");
+      if (this.reportOptions.cacheArtifacts && !fs2.existsSync(artifactsDir)) {
+        fs2.mkdirSync(artifactsDir, { recursive: true });
+      }
+      const processedCommands = this.cachedCommands.map((cmd, idx) => {
+        if (cmd.fileData?.content) {
+          if (!this.reportOptions.cacheArtifacts) {
+            return {
+              ...cmd,
+              fileData: {
+                name: cmd.fileData.name,
+                type: cmd.fileData.type
+                // Content excluded - metadata only
+              }
+            };
+          }
+          const artifactFileName = `artifact-${idx}-${cmd.timestamp}.dat`;
+          const artifactPath = path.join(artifactsDir, artifactFileName);
+          let contentToSave = cmd.fileData.content;
+          if (this.reportOptions.compressArtifacts) {
+            contentToSave = compressArtifact(contentToSave);
+          }
+          fs2.writeFileSync(artifactPath, contentToSave, "utf8");
+          return {
+            ...cmd,
+            fileData: {
+              compressed: this.reportOptions.compressArtifacts,
+              contentPath: path.relative(cacheDir, artifactPath),
+              name: cmd.fileData.name,
+              type: cmd.fileData.type
+            }
+          };
+        }
+        return cmd;
+      });
       const cacheData = {
-        commands: this.cachedCommands,
+        commands: processedCommands,
         reportOptions: this.reportOptions,
         timestamp: Date.now()
       };
-      const cacheDir = path.dirname(this.reportOptions.cacheFilePath);
       if (!fs2.existsSync(cacheDir)) {
         fs2.mkdirSync(cacheDir, { recursive: true });
       }
@@ -859,6 +946,20 @@ ${error}
    * Caches a ReportPortal command for later execution
    */
   cacheCommand(params) {
+    if (params.fileData?.content && this.reportOptions.maxCacheSize) {
+      const estimatedSize = params.fileData.content.length;
+      if (this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize) {
+        console.warn(
+          `Cache size limit approaching (${Math.round(this.currentCacheSize / (1024 * 1024))}MB / ${Math.round(this.reportOptions.maxCacheSize / (1024 * 1024))}MB). Flushing cache...`
+        );
+        this.saveCacheToFile();
+        if (this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize) {
+          console.warn("Cache size still too large. Skipping artifact caching for this item.");
+          params.fileData = void 0;
+        }
+      }
+      this.currentCacheSize += estimatedSize;
+    }
     const command = {
       data: params.data,
       timestamp: Date.now(),
@@ -869,8 +970,11 @@ ${error}
       ...params.fileData && { fileData: params.fileData }
     };
     this.cachedCommands.push(command);
+    this.commandCounter++;
     if (this.reportOptions.saveToFile) {
-      const shouldSave = this.reportOptions.offlineMode || params.type === "startLaunch" || params.type === "finishLaunch" || this.cachedCommands.length % 10 === 0;
+      const flushInterval = this.reportOptions.flushInterval ?? 50;
+      const shouldSave = this.reportOptions.offlineMode || params.type === "startLaunch" || params.type === "finishLaunch" || this.commandCounter % flushInterval === 0 || // Flush based on configured interval
+      this.currentCacheSize > (this.reportOptions.maxCacheSize ?? 50 * 1024 * 1024) * 0.8;
       if (shouldSave) {
         this.saveCacheToFile();
       }
