@@ -417,6 +417,7 @@ var DetoxReporter = class {
         const replayScriptPath = this.reportOptions.cacheFilePath.replace(".json", "-replay.js");
         generateReplayScript(this.reportOptions.cacheFilePath, replayScriptPath);
       }
+      this.currentCacheSize = 0;
     } catch (error) {
       console.error("Failed to save cache to file:", error);
     }
@@ -946,19 +947,41 @@ ${error}
    * Caches a ReportPortal command for later execution
    */
   cacheCommand(params) {
-    if (params.fileData?.content && this.reportOptions.maxCacheSize) {
+    if (params.fileData?.content && this.reportOptions.cacheArtifacts) {
       const estimatedSize = params.fileData.content.length;
-      if (this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize) {
-        console.warn(
-          `Cache size limit approaching (${Math.round(this.currentCacheSize / (1024 * 1024))}MB / ${Math.round(this.reportOptions.maxCacheSize / (1024 * 1024))}MB). Flushing cache...`
-        );
-        this.saveCacheToFile();
-        if (this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize) {
-          console.warn("Cache size still too large. Skipping artifact caching for this item.");
-          params.fileData = void 0;
+      const shouldWriteImmediately = this.reportOptions.offlineMode || estimatedSize > 1024 * 1024 || // > 1MB
+      this.reportOptions.maxCacheSize && this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize;
+      if (shouldWriteImmediately && this.reportOptions.cacheFilePath) {
+        const cacheDir = path.dirname(this.reportOptions.cacheFilePath);
+        const artifactsDir = path.join(cacheDir, "rp-cache-artifacts");
+        if (!fs2.existsSync(artifactsDir)) {
+          fs2.mkdirSync(artifactsDir, { recursive: true });
+        }
+        const timestamp = Date.now();
+        const artifactFileName = `artifact-${this.cachedCommands.length}-${timestamp}.dat`;
+        const artifactPath = path.join(artifactsDir, artifactFileName);
+        try {
+          let contentToSave = params.fileData.content;
+          if (this.reportOptions.compressArtifacts) {
+            contentToSave = compressArtifact(contentToSave);
+          }
+          fs2.writeFileSync(artifactPath, contentToSave, "utf8");
+          params.fileData = {
+            contentPath: path.relative(cacheDir, artifactPath),
+            name: params.fileData.name,
+            type: params.fileData.type,
+            ...this.reportOptions.compressArtifacts && { compressed: this.reportOptions.compressArtifacts }
+          };
+        } catch (error) {
+          console.error("Failed to write artifact to external file:", error);
+          this.currentCacheSize += estimatedSize;
+        }
+      } else {
+        this.currentCacheSize += estimatedSize;
+        if (this.reportOptions.maxCacheSize && this.currentCacheSize > this.reportOptions.maxCacheSize * 0.8) {
+          this.saveCacheToFile();
         }
       }
-      this.currentCacheSize += estimatedSize;
     }
     const command = {
       data: params.data,
