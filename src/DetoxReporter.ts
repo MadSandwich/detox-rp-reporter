@@ -215,6 +215,10 @@ export default class DetoxReporter implements Reporter {
 				const replayScriptPath = this.reportOptions.cacheFilePath.replace('.json', '-replay.js')
 				generateReplayScript(this.reportOptions.cacheFilePath, replayScriptPath)
 			}
+
+			// Reset cache size after flushing to disk
+			// Artifacts are now in external files, so they don't count toward memory size
+			this.currentCacheSize = 0
 		} catch (error) {
 			console.error('Failed to save cache to file:', error)
 		}
@@ -876,25 +880,62 @@ export default class DetoxReporter implements Reporter {
 		parentId?: string
 		fileData?: CachedCommand['fileData']
 	}): void {
-		// Memory optimization: check cache size before adding
-		if (params.fileData?.content && this.reportOptions.maxCacheSize) {
+		// In offline mode or when caching artifacts, save large files immediately to external storage
+		if (params.fileData?.content && this.reportOptions.cacheArtifacts) {
 			const estimatedSize = params.fileData.content.length
 
-			if (this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize) {
-				console.warn(
-					`Cache size limit approaching (${Math.round(this.currentCacheSize / (1024 * 1024))}MB / ${Math.round(this.reportOptions.maxCacheSize / (1024 * 1024))}MB). Flushing cache...`
-				)
-				this.saveCacheToFile()
+			// For offline mode or large artifacts, write to external file immediately
+			const shouldWriteImmediately =
+				this.reportOptions.offlineMode ||
+				estimatedSize > 1024 * 1024 || // > 1MB
+				(this.reportOptions.maxCacheSize && this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize)
 
-				// After flush, if we're still over limit, skip file data
-				if (this.currentCacheSize + estimatedSize > this.reportOptions.maxCacheSize) {
-					console.warn('Cache size still too large. Skipping artifact caching for this item.')
-					params.fileData = undefined
+			if (shouldWriteImmediately && this.reportOptions.cacheFilePath) {
+				const cacheDir = path.dirname(this.reportOptions.cacheFilePath)
+				const artifactsDir = path.join(cacheDir, 'rp-cache-artifacts')
+
+				if (!fs.existsSync(artifactsDir)) {
+					fs.mkdirSync(artifactsDir, { recursive: true })
+				}
+
+				const timestamp = Date.now()
+				const artifactFileName = `artifact-${this.cachedCommands.length}-${timestamp}.dat`
+				const artifactPath = path.join(artifactsDir, artifactFileName)
+
+				try {
+					let contentToSave = params.fileData.content
+
+					// Compress if enabled
+					if (this.reportOptions.compressArtifacts) {
+						contentToSave = compressArtifact(contentToSave)
+					}
+
+					fs.writeFileSync(artifactPath, contentToSave, 'utf8')
+
+					// Replace content with reference
+					params.fileData = {
+						contentPath: path.relative(cacheDir, artifactPath),
+						name: params.fileData.name,
+						type: params.fileData.type,
+						...(this.reportOptions.compressArtifacts && { compressed: this.reportOptions.compressArtifacts }),
+					}
+
+					// Don't count external files toward memory size
+					// (they're already on disk)
+				} catch (error) {
+					console.error('Failed to write artifact to external file:', error)
+					// Keep in memory as fallback
+					this.currentCacheSize += estimatedSize
+				}
+			} else {
+				// Keep in memory - update cache size tracker
+				this.currentCacheSize += estimatedSize
+
+				// Trigger flush if approaching limit
+				if (this.reportOptions.maxCacheSize && this.currentCacheSize > this.reportOptions.maxCacheSize * 0.8) {
+					this.saveCacheToFile()
 				}
 			}
-
-			// Update cache size tracker
-			this.currentCacheSize += estimatedSize
 		}
 
 		const command: CachedCommand = {
